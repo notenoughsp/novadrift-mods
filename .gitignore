@@ -1,0 +1,4 @@
+build/
+save-backup/
+__pycache__/
+*.log

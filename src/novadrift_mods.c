@@ -1,0 +1,585 @@
+// Nova Drift Mod-Loader (version.dll-Proxy)
+// Hakt sich in die YYC-kompilierten GML-Funktionen ein und setzt Spielvariablen aus
+// novadrift_mods.ini. Adressen werden zur Laufzeit ueber Namen/Bytemuster gesucht.
+
+#define _USE_MATH_DEFINES
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <math.h>
+
+// ---------------------------------------------------------------- Proxy ----
+
+#define PROXY_EXPORTS(X) \
+    X(GetFileVersionInfoA) X(GetFileVersionInfoByHandle) X(GetFileVersionInfoExA) \
+    X(GetFileVersionInfoExW) X(GetFileVersionInfoSizeA) X(GetFileVersionInfoSizeExA) \
+    X(GetFileVersionInfoSizeExW) X(GetFileVersionInfoSizeW) X(GetFileVersionInfoW) \
+    X(VerFindFileA) X(VerFindFileW) X(VerInstallFileA) X(VerInstallFileW) \
+    X(VerLanguageNameA) X(VerLanguageNameW) X(VerQueryValueA) X(VerQueryValueW)
+
+#define X(n) void *p_##n;
+PROXY_EXPORTS(X)
+#undef X
+
+#define X(n) \
+    __asm__(".globl " #n "\n" #n ":\n jmp *p_" #n "(%rip)\n");
+PROXY_EXPORTS(X)
+#undef X
+
+static void load_real_version(void) {
+    wchar_t path[MAX_PATH];
+    GetSystemDirectoryW(path, MAX_PATH);
+    wcscat(path, L"\\version.dll");
+    HMODULE h = LoadLibraryW(path);
+    if (!h) return;
+#define X(n) p_##n = (void *)GetProcAddress(h, #n);
+    PROXY_EXPORTS(X)
+#undef X
+}
+
+// ------------------------------------------------------------------ Log ----
+
+static wchar_t g_dir[MAX_PATH];
+static FILE *g_log;
+
+static void logf_(const char *fmt, ...) {
+    if (!g_log) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(g_log, fmt, ap);
+    va_end(ap);
+    fputc('\n', g_log);
+    fflush(g_log);
+}
+
+// -------------------------------------------------------- Image helpers ----
+
+typedef struct { uint8_t *start, *end; } Range;
+static Range g_text, g_rdata, g_data;
+
+static void find_sections(void) {
+    uint8_t *base = (uint8_t *)GetModuleHandleW(NULL);
+    IMAGE_NT_HEADERS64 *nt = (IMAGE_NT_HEADERS64 *)(base + ((IMAGE_DOS_HEADER *)base)->e_lfanew);
+    IMAGE_SECTION_HEADER *s = IMAGE_FIRST_SECTION(nt);
+    for (int i = 0; i < nt->FileHeader.NumberOfSections; i++, s++) {
+        Range r = { base + s->VirtualAddress, base + s->VirtualAddress + s->Misc.VirtualSize };
+        if (!memcmp(s->Name, ".text", 6)) g_text = r;
+        else if (!memcmp(s->Name, ".rdata", 7)) g_rdata = r;
+        else if (!memcmp(s->Name, ".data", 6)) g_data = r;
+    }
+}
+
+static int in_range(Range r, const void *p) { return (uint8_t *)p >= r.start && (uint8_t *)p < r.end; }
+
+static uint8_t *rel32_target(uint8_t *p) { return p + 4 + *(int32_t *)p; }
+
+// Sucht die Funktion zu "gml_Script_xyz" ueber die YYC-Funktionstabelle {name, func, ...}.
+static uint8_t *find_gml_function(const char *name) {
+    size_t len = strlen(name) + 1;
+    for (uint8_t *p = g_rdata.start; p + len <= g_rdata.end; p++) {
+        if (*p != (uint8_t)name[0] || memcmp(p, name, len)) continue;
+        if (p > g_rdata.start && p[-1] != 0) continue;
+        for (uint8_t **q = (uint8_t **)g_data.start; (uint8_t *)(q + 2) <= g_data.end; q++)
+            if (q[0] == p && in_range(g_text, q[1])) return q[1];
+    }
+    return NULL;
+}
+
+static uint8_t *find_pattern(uint8_t *from, size_t len, const char *pat, const char *mask) {
+    size_t n = strlen(mask);
+    for (uint8_t *p = from; p + n <= from + len; p++) {
+        size_t i = 0;
+        while (i < n && (mask[i] == '?' || p[i] == (uint8_t)pat[i])) i++;
+        if (i == n) return p;
+    }
+    return NULL;
+}
+
+// --------------------------------------------------------- Variables -------
+
+// YYC legt fuer jede GML-Variable einen Eintrag {const char *name; int id;} an.
+// Beim Laden steht id noch auf -1, die Runtime traegt die echte ID spaeter ein.
+typedef struct { const char *name; int32_t *id; } VarEntry;
+static VarEntry *g_vars;
+static size_t g_var_count;
+
+static int var_cmp(const void *a, const void *b) {
+    return strcmp(((const VarEntry *)a)->name, ((const VarEntry *)b)->name);
+}
+
+static void build_var_table(void) {
+    size_t cap = 1 << 15;
+    g_vars = malloc(cap * sizeof *g_vars);
+    for (uint8_t *p = g_data.start; p + 16 <= g_data.end; p += 8) {
+        const char *name = *(const char **)p;
+        if (*(uint64_t *)(p + 8) != 0xffffffffull || !in_range(g_rdata, name)) continue;
+        const char *c = name;
+        while (in_range(g_rdata, c) && *c && ((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') ||
+                                              (*c >= '0' && *c <= '9') || *c == '_'))
+            c++;
+        if (*c || c == name) continue;
+        if (g_var_count == cap) g_vars = realloc(g_vars, (cap *= 2) * sizeof *g_vars);
+        g_vars[g_var_count++] = (VarEntry){ name, (int32_t *)(p + 8) };
+    }
+    qsort(g_vars, g_var_count, sizeof *g_vars, var_cmp);
+}
+
+// Builtin-Funktionen (ds_list_add, sprite_add, ...) stehen in derselben Tabelle,
+// tragen aber anfangs 0 statt -1. Zur Laufzeit steht dort der Funktionsindex.
+static int builtin_id(const char *name) {
+    for (uint8_t *p = g_data.start; p + 16 <= g_data.end; p += 8) {
+        const char *s = *(const char **)p;
+        if (in_range(g_rdata, s) && !strcmp(s, name)) return *(int32_t *)(p + 8);
+    }
+    return -1;
+}
+
+static int var_id(const char *name) {
+    VarEntry key = { name, NULL };
+    VarEntry *e = bsearch(&key, g_vars, g_var_count, sizeof *g_vars, var_cmp);
+    return e ? *e->id : -1;
+}
+
+// RValue der GameMaker-Runtime
+typedef struct { union { double real; int32_t i32; int64_t i64; void *ptr; }; uint32_t flags, kind; } RValue;
+enum { KIND_REAL = 0, KIND_INT32 = 2, KIND_INT64 = 10, KIND_BOOL = 13, KIND_REF = 15 };
+
+typedef RValue *(*GetRefFn)(void *inst, int id);
+typedef void (*SetIntFn)(RValue *rv, int v);
+typedef void (*SetRealFn)(RValue *rv, double v);
+typedef RValue *(*VtGetRefFn)(void *inst, int id);
+
+static GetRefFn g_get_ref;
+static SetIntFn g_set_int;
+static SetRealFn g_set_real;
+static void **g_global_ptr;  // Zeiger auf das GML-"global"-Objekt
+
+static int rv_get(const RValue *rv, double *out) {
+    switch (rv->kind & 0xffffff) {
+    case KIND_REAL: case KIND_BOOL: *out = rv->real; return 1;
+    case KIND_INT32: *out = rv->i32; return 1;
+    case KIND_INT64: *out = (double)rv->i64; return 1;
+    case KIND_REF: *out = (double)(int32_t)rv->i64; return 1;  // Asset-Referenz: unten steht der Index
+    }
+    return 0;
+}
+
+static void rv_set(RValue *rv, double v) {
+    uint32_t kind = rv->kind & 0xffffff;
+    if (kind == KIND_INT32 && v == floor(v) && fabs(v) < 2147483648.0) g_set_int(rv, (int)v);
+    else g_set_real(rv, v);
+}
+
+static RValue *global_ref(const char *name) {
+    int id = var_id(name);
+    void *g = g_global_ptr ? *g_global_ptr : NULL;
+    if (id < 0 || !g) return NULL;
+    VtGetRefFn fn = (*(VtGetRefFn **)g)[1];
+    return fn(g, id);
+}
+
+// ------------------------------------------------------------ Assets -------
+
+// Objektnamen aus data.win (OBJT-Chunk), damit Waffen per Name ansprechbar sind.
+static char **g_obj_names;
+static uint32_t g_obj_count;
+
+static void load_object_names(void) {
+    wchar_t path[MAX_PATH];
+    swprintf(path, MAX_PATH, L"%ls\\data.win", g_dir);
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) return;
+    uint32_t hdr[2];
+    long pos = 8, objt = -1;
+    while (fseek(f, pos, SEEK_SET) == 0 && fread(hdr, 4, 2, f) == 2) {
+        if (!memcmp(hdr, "OBJT", 4)) { objt = pos + 8; break; }
+        pos += 8 + hdr[1];
+    }
+    if (objt >= 0 && fread(&g_obj_count, 4, 1, f) == 1 && g_obj_count < 100000) {
+        uint32_t *offs = malloc(g_obj_count * 4);
+        fread(offs, 4, g_obj_count, f);
+        g_obj_names = calloc(g_obj_count, sizeof *g_obj_names);
+        for (uint32_t i = 0; i < g_obj_count; i++) {
+            uint32_t str;
+            char buf[128] = "";
+            fseek(f, offs[i], SEEK_SET);
+            if (fread(&str, 4, 1, f) != 1) continue;
+            fseek(f, str, SEEK_SET);
+            if (!fgets(buf, sizeof buf, f)) continue;
+            buf[strcspn(buf, "\r\n")] = 0;
+            g_obj_names[i] = _strdup(buf);
+        }
+        free(offs);
+    }
+    fclose(f);
+    logf_("%u Objektnamen aus data.win gelesen", g_obj_count);
+}
+
+static const char *object_name(int idx) {
+    return idx >= 0 && (uint32_t)idx < g_obj_count && g_obj_names[idx] ? g_obj_names[idx] : "?";
+}
+
+// Reihenfolge wie im Spiel (Lokalisierung); 0 = keine Ausruestung
+static const char *BODY_NAMES[] = { "None", "Standard", "Assault", "Hullbreaker", "Spectre", "Firefly",
+                                    "Sentinel", "Engineer", "Research", "Battery", "Architect", "Viper",
+                                    "Carrier", "Courser", "Leviathan" };
+static const char *SHIELD_NAMES[] = { "None", "Standard", "Halo", "Reflect", "Bastion", "Temporal",
+                                      "Amp", "Warp", "Orbital", "Siphon", "Shockwave" };
+
+static const char *table_name(const char **names, int count, int idx) {
+    return idx >= 0 && idx < count ? names[idx] : "?";
+}
+
+// ---------------------------------------------------------------- INI ------
+
+typedef struct { char section[32]; char name[64]; double value; } Override;
+static Override *g_ovr;
+static size_t g_ovr_count, g_ovr_cap;
+static int g_dump, g_modded, g_block_always = 1;
+
+static void trim(char *s) {
+    char *e = s + strlen(s);
+    while (e > s && (e[-1] == ' ' || e[-1] == '\t' || e[-1] == '\r' || e[-1] == '\n')) *--e = 0;
+    size_t lead = strspn(s, " \t");
+    memmove(s, s + lead, strlen(s + lead) + 1);
+}
+
+// [newbody]/[newweapon]-Texte: "abschnitt.key" -> UTF-8-Text (\n wird zu Zeilenumbruch)
+typedef struct { char key[64]; char *text; } GearText;
+static GearText g_texts[48];
+static int g_text_count;
+
+static void gear_text_set(const char *section, const char *key, const char *val) {
+    char full[64];
+    snprintf(full, sizeof full, "%s.%s", section, key);
+    GearText *t = NULL;
+    for (int i = 0; i < g_text_count; i++)
+        if (!_stricmp(g_texts[i].key, full)) t = &g_texts[i];
+    if (!t) {
+        if (g_text_count == 48) return;
+        t = &g_texts[g_text_count++];
+        snprintf(t->key, sizeof t->key, "%s", full);
+    }
+    char *text = malloc(strlen(val) * 2 + 1), *o = text;
+    for (const char *c = val; *c; c++) {
+        if (c[0] == '\\' && c[1] == 'n') { *o++ = '\r'; *o++ = '\n'; c++; }
+        else *o++ = *c;
+    }
+    *o = 0;
+    // Alte Texte bleiben im Speicher: zwischengespeicherte GML-Strings koennen darauf zeigen
+    if (t->text && !strcmp(t->text, text)) { free(text); return; }
+    t->text = text;
+}
+
+static const char *gear_text_get(const char *section, const char *key) {
+    char full[64];
+    snprintf(full, sizeof full, "%s.%s", section, key);
+    for (int i = 0; i < g_text_count; i++)
+        if (!_stricmp(g_texts[i].key, full)) return g_texts[i].text;
+    return NULL;
+}
+
+// Liest eine INI-Datei; profile=<name> in [settings] laedt zusaetzlich
+// novadrift_profiles\<name>.ini (Profile koennen keine weiteren Profile laden).
+static int parse_ini(const wchar_t *path, int allow_profile) {
+    FILE *f = _wfopen(path, L"r");
+    if (!f) return 0;
+    char line[512], section[32] = "";
+    while (fgets(line, sizeof line, f)) {
+        char *c = strpbrk(line, ";#");
+        if (c) *c = 0;
+        trim(line);
+        if (!*line) continue;
+        if (*line == '[') {
+            char *e = strchr(line, ']');
+            if (e) *e = 0;
+            snprintf(section, sizeof section, "%s", line + 1);
+            continue;
+        }
+        char *eq = strchr(line, '=');
+        if (!eq) continue;
+        *eq = 0;
+        char *key = line, *val = eq + 1;
+        trim(key);
+        trim(val);
+        if (!_stricmp(section, "newbody") || !_stricmp(section, "newweapon")) {
+            gear_text_set(section, key, val);
+            continue;
+        }
+        if (!_stricmp(section, "settings")) {
+            if (!_stricmp(key, "dump")) g_dump = atoi(val);
+            if (!_stricmp(key, "block_leaderboards")) g_block_always = atoi(val);
+            if (!_stricmp(key, "profile") && *val && allow_profile) {
+                wchar_t ppath[MAX_PATH];
+                swprintf(ppath, MAX_PATH, L"%ls\\novadrift_profiles\\%hs.ini", g_dir, val);
+                if (parse_ini(ppath, 0)) logf_("Profil geladen: %s", val);
+                else logf_("FEHLER: Profil nicht gefunden: %ls", ppath);
+            }
+            continue;
+        }
+        char *end;
+        double v = strtod(val, &end);
+        if (end == val) { logf_("  Ungueltiger Wert: [%s] %s=%s", section, key, val); continue; }
+        if (g_ovr_count == g_ovr_cap)
+            g_ovr = realloc(g_ovr, (g_ovr_cap = g_ovr_cap ? g_ovr_cap * 2 : 64) * sizeof *g_ovr);
+        Override *o = &g_ovr[g_ovr_count++];
+        snprintf(o->section, sizeof o->section, "%s", section);
+        snprintf(o->name, sizeof o->name, "%s", key);
+        o->value = v;
+    }
+    fclose(f);
+    return 1;
+}
+
+static void load_ini(void) {
+    wchar_t path[MAX_PATH];
+    swprintf(path, MAX_PATH, L"%ls\\novadrift_mods.ini", g_dir);
+    g_ovr_count = 0;
+    g_dump = 0;
+    g_block_always = 1;
+    if (!parse_ini(path, 1)) { logf_("Keine novadrift_mods.ini gefunden"); return; }
+    logf_("novadrift_mods.ini geladen: %zu Eintraege", g_ovr_count);
+}
+
+static void apply_section(void *self, const char *section, int verbose) {
+    for (size_t i = 0; i < g_ovr_count; i++) {
+        Override *o = &g_ovr[i];
+        if (_stricmp(o->section, section)) continue;
+        int id = var_id(o->name);
+        if (id < 0) {
+            if (verbose) logf_("  [%s] %s: unbekannte Variable", section, o->name);
+            continue;
+        }
+        RValue *rv = g_get_ref(self, id);
+        double old = NAN;
+        rv_get(rv, &old);
+        rv_set(rv, o->value);
+        g_modded = 1;
+        if (verbose) logf_("  [%s] %s: %g -> %g", section, o->name, old, o->value);
+    }
+}
+
+// Wendet [prefix.<nummer>] und [prefix.<name>] an
+static void apply_gear(void *self, const char *prefix, int idx, const char *name, int verbose) {
+    char sec[96];
+    snprintf(sec, sizeof sec, "%s.%d", prefix, idx);
+    apply_section(self, sec, verbose);
+    snprintf(sec, sizeof sec, "%s.%s", prefix, name);
+    apply_section(self, sec, verbose);
+}
+
+static double self_var(void *self, const char *name) {
+    int id = var_id(name);
+    double v = -1;
+    if (id >= 0) rv_get(g_get_ref(self, id), &v);
+    return v;
+}
+
+// Gesperrt wird immer bei geaenderten Werten, sonst je nach block_leaderboards (Standard: an)
+static int block_leaderboards(void) {
+    if (!g_modded && !g_block_always) return 0;
+    RValue *rv = global_ref("enableLeaderboards");
+    if (!rv) return 0;
+    g_set_real(rv, 0.0);
+    return 1;
+}
+
+// ---------------------------------------------------------------- Hooks ----
+
+// Laengenbestimmung nur fuer typische Prologbefehle; alles andere -> Abbruch.
+// *rip_disp erhaelt den Offset eines RIP-relativen disp32 (sonst -1).
+static int insn_len(const uint8_t *p, int *rip_disp) {
+    int n = 0;
+    *rip_disp = -1;
+    if ((p[0] & 0xf0) == 0x40) n++;
+    uint8_t op = p[n++];
+    if (op >= 0x50 && op <= 0x57) return n;
+    int imm = 0;
+    if (op == 0x88 || op == 0x89 || op == 0x8a || op == 0x8b || op == 0x8d) imm = 0;
+    else if (op == 0x83) imm = 1;
+    else if (op == 0x81) imm = 4;
+    else return 0;
+    uint8_t modrm = p[n++], mod = modrm >> 6, rm = modrm & 7;
+    if (mod == 0 && rm == 5) {  // RIP-relativ: disp32 wird beim Kopieren umgerechnet
+        *rip_disp = n;
+        return n + 4 + imm;
+    }
+    if (mod != 3 && rm == 4) {
+        uint8_t sib = p[n++];
+        if (mod == 0 && (sib & 7) == 5) n += 4;
+    }
+    if (mod == 1) n += 1;
+    if (mod == 2) n += 4;
+    return n + imm;
+}
+
+static void write_abs_jmp(uint8_t *at, void *to) {
+    at[0] = 0xff; at[1] = 0x25;
+    *(uint32_t *)(at + 2) = 0;
+    *(void **)(at + 6) = to;
+}
+
+static void *hook(uint8_t *target, void *detour, const char *name) {
+    if (!target) { logf_("FEHLER: %s nicht gefunden", name); return NULL; }
+    int stolen = 0, rip_at[8], rip_end[8], rip_count = 0;
+    while (stolen < 14) {
+        int disp, l = insn_len(target + stolen, &disp);
+        if (!l) { logf_("FEHLER: Prolog von %s unbekannt", name); return NULL; }
+        if (disp >= 0) rip_at[rip_count] = stolen + disp, rip_end[rip_count++] = stolen + l;
+        stolen += l;
+    }
+    // Trampolin in Reichweite (+-2 GB) des Spielcodes, damit RIP-relative Adressen passen
+    uint8_t *tramp = NULL;
+    for (uintptr_t a = ((uintptr_t)target & ~0xffffull) - 0x10000; !tramp && a > (uintptr_t)target - 0x70000000; a -= 0x10000)
+        tramp = VirtualAlloc((void *)a, 64, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    if (!tramp) { logf_("FEHLER: kein Speicher fuer Trampolin von %s", name); return NULL; }
+    memcpy(tramp, target, stolen);
+    for (int i = 0; i < rip_count; i++) {
+        uint8_t *dest = target + rip_end[i] + *(int32_t *)(target + rip_at[i]);
+        *(int32_t *)(tramp + rip_at[i]) = (int32_t)(dest - (tramp + rip_end[i]));
+    }
+    write_abs_jmp(tramp + stolen, target + stolen);
+    DWORD old;
+    VirtualProtect(target, stolen, PAGE_EXECUTE_READWRITE, &old);
+    write_abs_jmp(target, detour);
+    for (int i = 14; i < stolen; i++) target[i] = 0x90;
+    VirtualProtect(target, stolen, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), target, stolen);
+    logf_("Hook gesetzt: %s @ %p", name, target);
+    return tramp;
+}
+
+// YYC-Skriptfunktion: RValue* f(self, other, result, argc, argv)
+typedef void *(*GmlFn)(void *, void *, void *, int, void **);
+static GmlFn o_init_vars, o_assign_base_stats, o_spawn_enemies, o_end_score;
+
+static void *hk_init_vars(void *self, void *other, void *ret, int argc, void **argv) {
+    void *r = o_init_vars(self, other, ret, argc, argv);
+    load_ini();
+    apply_section(self, "vars", 1);
+    block_leaderboards();
+    return r;
+}
+
+static const char *DUMP_VARS[] = {
+    "bodySetHull", "bodySetHullMax", "bodySetAccell", "bodyMultFireTime", "bodyMultDamage",
+    "bodyMultShield", "bodyMultSpread", "bodyMultVelocity", "bodyMultShipSize", "bodyMultSize",
+    "bodyAddProjectiles", "bodyMagnetism", "weaponSetDamage", "weaponSetVelocity",
+    "weaponBaseFireTime", "weaponSetProjectiles", "weaponSetSpread", "weaponSetSize",
+    "weaponAddSeeking", "seekRate", "shieldSetShield", "shieldSetShieldMax", "shieldSetShieldCool",
+    "shieldMultDamage", "shieldMultAccell",
+};
+
+static void gear_pre_assign(void *self);
+static int newgear_post_assign(void *self, int which, int verbose);
+static void newgear_update_skin(void *self, void *other);
+
+static void *hk_assign_base_stats(void *self, void *other, void *ret, int argc, void **argv) {
+    gear_pre_assign(self);
+    void *r = o_assign_base_stats(self, other, ret, argc, argv);
+    static int last_body = -2, last_weapon = -2, last_shield = -2;
+    int body = (int)self_var(self, "bodyType");
+    int weapon = (int)self_var(self, "weaponType");
+    int shield = (int)self_var(self, "shieldType");
+    const char *body_name = table_name(BODY_NAMES, sizeof BODY_NAMES / sizeof *BODY_NAMES, body);
+    const char *shield_name = table_name(SHIELD_NAMES, sizeof SHIELD_NAMES / sizeof *SHIELD_NAMES, shield);
+    const char *weapon_name = object_name(weapon);
+    if (weapon_name[0] == 'o') weapon_name++;  // oRailgun -> Railgun
+
+    // Nur bei geaenderter Ausruestung ins Log schreiben (wird sehr oft aufgerufen)
+    int verbose = body != last_body || weapon != last_weapon || shield != last_shield;
+    last_body = body, last_weapon = weapon, last_shield = shield;
+    if (verbose) {
+        logf_("Ausruestung: [body.%s] (%d)  [weapon.%s] (%d)  [shield.%s] (%d)", body_name, body,
+              weapon_name, weapon, shield_name, shield);
+        if (g_dump)
+            for (size_t i = 0; i < sizeof DUMP_VARS / sizeof *DUMP_VARS; i++)
+                logf_("  dump %s = %g", DUMP_VARS[i], self_var(self, DUMP_VARS[i]));
+    }
+    // Neue Gear (eigener Body/eigene Waffe) statt der normalen Abschnitte
+    if (!newgear_post_assign(self, 0, verbose)) apply_gear(self, "body", body, body_name, verbose);
+    newgear_update_skin(self, other);
+    if (!newgear_post_assign(self, 1, verbose)) apply_gear(self, "weapon", weapon, weapon_name, verbose);
+    apply_gear(self, "shield", shield, shield_name, verbose);
+    block_leaderboards();
+    return r;
+}
+
+static void *hk_spawn_enemies(void *self, void *other, void *ret, int argc, void **argv) {
+    void *r = o_spawn_enemies(self, other, ret, argc, argv);
+    block_leaderboards();
+    return r;
+}
+
+static void *hk_end_score(void *self, void *other, void *ret, int argc, void **argv) {
+    if (block_leaderboards()) logf_("Run-Ende: Score-Upload gesperrt");
+    else logf_("Run-Ende: Score-Upload NICHT gesperrt");
+    return o_end_score(self, other, ret, argc, argv);
+}
+
+#include "newgear.inc"
+#include "whip.inc"
+
+static void install(void) {
+    find_sections();
+    build_var_table();
+    logf_("%zu GML-Variablen gefunden", g_var_count);
+
+    uint8_t *init_vars = find_gml_function("gml_Script_initializeVariables");
+    uint8_t *assign = find_gml_function("gml_Script_assignBaseStats");
+    uint8_t *spawn = find_gml_function("gml_Script_spawnEnemies");
+    uint8_t *end_score = find_gml_function("gml_Object_oDrawEndScore_Create_0");
+    if (!init_vars || !assign) { logf_("FEHLER: Kernfunktionen nicht gefunden, Mods deaktiviert"); return; }
+
+    // Runtime-Helfer aus den Aufrufmustern in initializeVariables ableiten
+    uint8_t *p;
+    if ((p = find_pattern(init_vars, 0x10000, "\x8b\x15????\x49\x8b\xce\xe8", "xx????xxxx")))
+        g_get_ref = (GetRefFn)rel32_target(p + 10);
+    if ((p = find_pattern(init_vars, 0x10000, "\xba????\x48\x8b\xc8\xe8", "x????xxxx")))
+        g_set_int = (SetIntFn)rel32_target(p + 9);
+    if ((p = find_pattern(init_vars, 0x10000, "\xf2\x0f\x10\x0d????\x48\x8b\xc8\xe8", "xxxx????xxxx")))
+        g_set_real = (SetRealFn)rel32_target(p + 12);
+    // global-Objekt: mov rcx,[global]; mov r8,[rcx]; mov edx,[id]; call [r8+8]
+    if (spawn && (p = find_pattern(spawn, 0x4000, "\x48\x8b\x0d????\x4c\x8b\x01\x8b\x15????\x41\xff\x50\x08",
+                                    "xxx????xxxxx????xxxx")))
+        g_global_ptr = (void **)rel32_target(p + 3);
+    logf_("Helfer: getRef=%p setInt=%p setReal=%p global=%p", g_get_ref, g_set_int, g_set_real, g_global_ptr);
+    if (!g_get_ref || !g_set_int || !g_set_real) { logf_("FEHLER: Runtime-Helfer nicht gefunden"); return; }
+
+    o_init_vars = hook(init_vars, hk_init_vars, "initializeVariables");
+    o_assign_base_stats = hook(assign, hk_assign_base_stats, "assignBaseStats");
+    if (g_global_ptr) {
+        o_spawn_enemies = hook(spawn, hk_spawn_enemies, "spawnEnemies");
+        o_end_score = hook(end_score, hk_end_score, "oDrawEndScore_Create_0");
+    }
+    if (!g_global_ptr || !o_end_score)
+        logf_("WARNUNG: Bestenlisten-Sperre nicht aktiv - keine Scores einreichen!");
+}
+
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
+    (void)reserved;
+    if (reason != DLL_PROCESS_ATTACH) return TRUE;
+    DisableThreadLibraryCalls(inst);
+    load_real_version();
+    GetModuleFileNameW(NULL, g_dir, MAX_PATH);
+    wchar_t *slash = wcsrchr(g_dir, L'\\');
+    if (slash) *slash = 0;
+    wchar_t exe[MAX_PATH];
+    GetModuleFileNameW(NULL, exe, MAX_PATH);
+    if (!wcsstr(exe, L"NovaDrift.exe")) return TRUE;
+    wchar_t log[MAX_PATH];
+    swprintf(log, MAX_PATH, L"%ls\\novadrift_mods.log", g_dir);
+    g_log = _wfopen(log, L"w");
+    logf_("Nova Drift Mod-Loader gestartet");
+    load_object_names();
+    install();
+    load_ini();
+    install_newgear();
+    install_whip();
+    logf_("Bestenlisten-Sperre: %s", g_block_always ? "immer an" : "nur bei geaenderten Werten");
+    return TRUE;
+}
