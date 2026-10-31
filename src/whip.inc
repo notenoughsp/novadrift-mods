@@ -1,9 +1,7 @@
-// ---------------------------------------------------------- Schwanz-Peitsche --
-//
-// Liegt ein Gegner hinter dem Schiff, schwingt ein animierter Schwanz durch den
-// Bereich hinter dem Heck. Treffer laufen ueber ein oVenomStrike (Schadenslogik
-// des Spiels), dessen Flammen, Spur und Bewegung abgeschaltet werden.
-// Werte: whip_* in [newweapon] (siehe Profil-INI).
+// ------------------------------------------------------------- Tail whip ----
+// When an enemy is behind the ship, an animated tail swings through the area
+// behind it. Hits use an oVenomStrike (the game's damage logic) with its
+// flames, trail and movement disabled. Values: whip_* in [newweapon].
 
 static GmlEventFn o_player_step, o_venom_create;
 static int g_obj_player = -1, g_obj_solid = -1, g_obj_venom = -1;
@@ -14,7 +12,7 @@ static double whip_param(const char *key, double def) {
     return v ? atof(v) : def;
 }
 
-// Builtin per Name aufrufen (Funktionsindex wird zwischengespeichert)
+// Call a builtin by name (function index is cached)
 static RValue call_bi(void *self, void *other, const char *name, int argc, RValue *args) {
     static struct { const char *name; int id; } ids[16];
     int id = -1, i = 0;
@@ -30,7 +28,7 @@ static RValue call_bi(void *self, void *other, const char *name, int argc, RValu
     return res;
 }
 
-// Konstante GML-Strings fuer Variablennamen
+// Constant GML strings for variable names
 static RValue *gml_str(const char *s) {
     static struct { const char *src; RValue rv; } cache[16];
     int i = 0;
@@ -70,8 +68,8 @@ static void set_self_var(void *inst, const char *name, double value) {
     if (id >= 0) rv_set(g_get_ref(inst, id), value);
 }
 
-// Das Spiel toent das weisse Schiff ueber image_blend des Spielers in der Schildfarbe;
-// dieselbe Farbe bekommen Schwanzhieb und Schuesse, damit sie zum Schiff passen.
+// The game tints the white ship with the player's image_blend (shield color);
+// tail and shots get the same color so they match the ship.
 static int resolve_color(void *self, void *other, const char *spec, double *blend) {
     if (!spec) return 0;
     if (!_strnicmp(spec, "shield", 6)) {
@@ -88,13 +86,13 @@ static int resolve_color(void *self, void *other, const char *spec, double *blen
     return 1;
 }
 
-// Laufende Hiebe: Instanzzeiger (fuer direkte Variablen), Instanz-ID (fuer instance_exists)
+// Active lashes: instance pointer (direct variables), instance ID (instance_exists)
 static struct { void *inst; RValue id; int frame; double dir, side; } g_whips[4];
 static int g_whip_count, g_whip_side = 1;
-static void *g_whip_new;  // vom Create-Hook gemeldete neue Instanz
+static void *g_whip_new;  // new instance reported by the create hook
 static int g_whip_spawning;
 static RValue g_whip_sprite;
-static int g_whip_sprite_state;  // 0 = ungeladen, 1 = geladen, -1 = Fehler
+static int g_whip_sprite_state;  // 0 = not loaded, 1 = loaded, -1 = failed
 
 static int load_whip_sprite(void *self, void *other) {
     if (g_whip_sprite_state) return g_whip_sprite_state > 0;
@@ -103,7 +101,7 @@ static int load_whip_sprite(void *self, void *other) {
     if (!file) return 0;
     RValue a[9];
     g_make_string(&a[0], file);
-    make_real(&a[1], whip_param("whip_anim_frames", 1));  // Streifen mit Animationsbildern
+    make_real(&a[1], whip_param("whip_anim_frames", 1));  // strip of animation frames
     make_real(&a[2], 0);
     make_real(&a[3], 1);
     make_real(&a[4], whip_param("whip_origin_x", 12));
@@ -111,37 +109,37 @@ static int load_whip_sprite(void *self, void *other) {
     g_whip_sprite = call_bi(self, other, "sprite_add", 6, a);
     double idx = -1;
     rv_get(&g_whip_sprite, &idx);
-    if (idx < 0) { logf_("Peitsche: Sprite %s nicht geladen", file); return 0; }
-    // Praezise Kollisionsmaske je Animationsbild, damit nur der sichtbare Schwanz trifft
+    if (idx < 0) { logf_("Whip: sprite %s not loaded", file); return 0; }
+    // Precise collision mask per frame so only the visible tail hits
     a[0] = g_whip_sprite;
     for (int i = 1; i <= 7; i++) make_real(&a[i], 0);
     make_real(&a[1], 1);
-    make_real(&a[8], whip_param("whip_mask_tolerance", 60));  // niedriger = Leuchtsaum trifft mit
+    make_real(&a[8], whip_param("whip_mask_tolerance", 60));  // lower = glow counts as hitbox
     call_bi(self, other, "sprite_collision_mask", 9, a);
     g_whip_sprite_state = 1;
-    logf_("Peitsche: Sprite %s geladen -> Sprite %g", file, idx);
+    logf_("Whip: sprite %s loaded -> sprite %g", file, idx);
     return 1;
 }
 
-// Neue oVenomStrike-Instanz zum Schwanzhieb umbauen (nur waehrend wir sie erzeugen)
+// Turn a new oVenomStrike into a tail lash (only while we spawn it)
 static void hk_venom_create(void *self, void *other) {
     o_venom_create(self, other);
     if (!g_whip_spawning) return;
     g_whip_new = self;
-    set_builtin_at(self, "alarm", 0, -1);  // Farbwechsel
-    set_builtin_at(self, "alarm", 1, -1);  // Leuchtspur
-    set_builtin_at(self, "alarm", 2, -1);  // automatisches Ausblenden (steuern wir selbst)
-    set_builtin_at(self, "alarm", 5, -1);  // Flammenpartikel
+    set_builtin_at(self, "alarm", 0, -1);  // hue cycling
+    set_builtin_at(self, "alarm", 1, -1);  // trail
+    set_builtin_at(self, "alarm", 2, -1);  // auto fade (we control it)
+    set_builtin_at(self, "alarm", 5, -1);  // flame particles
     set_builtin(self, "sprite_index", &g_whip_sprite);
     double blend;
     if (resolve_color(self, other, gear_text(&g_gear[1], "whip_color"), &blend))
         set_builtin_at(self, "image_blend", (int)0x80000000, blend);
     set_builtin_at(self, "speed", (int)0x80000000, 0);
-    set_builtin_at(self, "image_speed", (int)0x80000000, 0);  // Bilder schalten wir selbst weiter
+    set_builtin_at(self, "image_speed", (int)0x80000000, 0);  // we advance frames ourselves
     set_builtin_at(self, "image_index", (int)0x80000000, 0);
     set_builtin_at(self, "image_xscale", (int)0x80000000, whip_param("whip_scale", 1));
     set_builtin_at(self, "image_yscale", (int)0x80000000, whip_param("whip_scale", 1));
-    set_self_var(self, "amplitude", 0);  // kein Wackeln
+    set_self_var(self, "amplitude", 0);  // no wobble
     set_self_var(self, "scale", 1);
 }
 
@@ -150,7 +148,7 @@ static void whip_strike(void *self, void *other, RValue player, double px, doubl
     double range = whip_param("whip_range", 220);
     RValue a[4];
 
-    // Naechster Gegner um einen Punkt hinter dem Schiff (GameMaker: y nach unten)
+    // Nearest enemy around a point behind the ship (GameMaker: y points down)
     make_real(&a[0], px - cos(face) * range * 0.5);
     make_real(&a[1], py + sin(face) * range * 0.5);
     a[2] = obj_ref(g_obj_solid);
@@ -161,9 +159,9 @@ static void whip_strike(void *self, void *other, RValue player, double px, doubl
     if (dx * dx + dy * dy > range * range) return;
     double dir = atan2(-dy, dx);
     double diff = fabs(remainder(dir - face, 2 * M_PI)) * 180 / M_PI;
-    if (diff < 180 - whip_param("whip_angle", 70)) return;  // nicht hinter dem Schiff
+    if (diff < 180 - whip_param("whip_angle", 70)) return;  // not behind the ship
 
-    // Schaden pro Frame Kontakt; das Spiel liest ihn beim Treffer aus oPowers.venomStrikeDamage
+    // Damage per frame of contact; the game reads it from oPowers.venomStrikeDamage on hit
     int dmg_id = var_id("venomStrikeDamage");
     if (g_powers && dmg_id >= 0) g_set_real(g_get_ref(g_powers, dmg_id), whip_param("whip_damage", 12));
 
@@ -183,18 +181,18 @@ static void whip_strike(void *self, void *other, RValue player, double px, doubl
     g_whips[g_whip_count].dir = dir * 180 / M_PI;
     g_whips[g_whip_count].side = g_whip_side;
     g_whip_count++;
-    g_whip_side = -g_whip_side;  // abwechselnd von links und rechts schwingen
+    g_whip_side = -g_whip_side;  // alternate swing direction
     g_whip_cooldown = (int)whip_param("whip_cooldown", 45);
 }
 
-// Laufende Hiebe am Heck halten und durch den Bogen schwingen lassen
+// Keep active lashes at the stern and swing them through the arc
 static void whip_update(void *self, void *other, double px, double py, double face) {
     double blend = 0;
     int has_blend = g_whip_count && resolve_color(self, other, gear_text(&g_gear[1], "whip_color"), &blend);
     int frames = (int)whip_param("whip_frames", 12);
     int anim = (int)whip_param("whip_anim_frames", 1);
     double swing = whip_param("whip_swing", 80), scale = whip_param("whip_scale", 1);
-    double tx = px - cos(face) * 18, ty = py + sin(face) * 18;  // Ansatz am Heck
+    double tx = px - cos(face) * 18, ty = py + sin(face) * 18;  // base at the stern
     for (int i = 0; i < g_whip_count;) {
         RValue a[1] = { g_whips[i].id };
         RValue alive = call_bi(self, other, "instance_exists", 1, a);
@@ -209,11 +207,11 @@ static void whip_update(void *self, void *other, double px, double py, double fa
         set_builtin_at(w, "direction", (int)0x80000000, ang);
         set_builtin_at(w, "image_angle", (int)0x80000000, ang);
         if (has_blend) set_builtin_at(w, "image_blend", (int)0x80000000, blend);
-        // Animationsbild passend zum Schwung; gespiegelt, damit die Spitze hinterherzieht
+        // Frame follows the swing; mirrored so the tip trails behind
         set_builtin_at(w, "image_index", (int)0x80000000, t * anim >= anim ? anim - 1 : floor(t * anim));
         set_builtin_at(w, "image_yscale", (int)0x80000000, -g_whips[i].side * scale);
         if (++g_whips[i].frame > frames) {
-            // Ausblenden: das Geschoss loescht sich im naechsten Step selbst
+            // Fade out: the instance destroys itself next step
             set_self_var(w, "fade", 1);
             set_builtin_at(w, "image_xscale", (int)0x80000000, 0.02);
             set_builtin_at(w, "image_yscale", (int)0x80000000, 0.012);
@@ -245,11 +243,11 @@ static void install_whip(void) {
     g_obj_player = find_object("oPlayer");
     g_obj_solid = find_object("oSolid");
     g_obj_venom = find_object("oVenomStrike");
-    if (g_obj_player < 0 || g_obj_solid < 0 || g_obj_venom < 0) { logf_("Peitsche: Objekte fehlen"); return; }
+    if (g_obj_player < 0 || g_obj_solid < 0 || g_obj_venom < 0) { logf_("Whip: objects missing"); return; }
     o_venom_create = hook_event("oVenomStrike", "Create_0", hk_venom_create);
     if (!o_venom_create) return;
     o_player_step = hook_event("oPlayer", "Step_0", hk_player_step);
     if (o_player_step)
-        logf_("Peitsche aktiv (Schaden %g pro Frame, Hieb %g Frames, alle %g Frames)", whip_param("whip_damage", 12),
+        logf_("Whip active (damage %g per frame, lash %g frames, every %g frames)", whip_param("whip_damage", 12),
               whip_param("whip_frames", 12), whip_param("whip_cooldown", 45));
 }

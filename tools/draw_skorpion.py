@@ -1,8 +1,8 @@
-"""Zeichnet den Skorpion-Skin fuer Nova Drift (weiss auf transparent).
+"""Draws the Skorpion custom skin for Nova Drift (white on transparent).
 
-Nase zeigt nach rechts (+x), wie bei den offiziellen Beispiel-Skins.
-Ausgabe: skorpion.png, skorpion_force.png, skorpion_drone.png, preview.png
-Aufruf:  python -I draw_skorpion.py <ausgabeordner>
+The nose points right (+x), like the official sample skins.
+Output: skorpion.png, skorpion_force.png, skorpion_drone.png, preview.png
+Usage:  python -I draw_skorpion.py <output_dir>
 """
 import math
 import os
@@ -10,7 +10,7 @@ import struct
 import sys
 import zlib
 
-SS = 4  # Supersampling pro Achse
+SS = 4  # supersampling per axis
 
 
 class Canvas:
@@ -23,7 +23,7 @@ class Canvas:
         return [(cx + x * s, cy - y * s) for x, y in pts]
 
     def fill(self, pts, value):
-        """Fuellt ein Polygon (Even-Odd) und setzt dort den Alphawert (Maler-Algorithmus)."""
+        """Fills a polygon (even-odd) and paints its alpha value over what is there."""
         poly = self._to_px(pts)
         cov = {}
         ys = [p[1] for p in poly]
@@ -69,7 +69,7 @@ def write_png(path, w, h, rows):
                 + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
 
 
-# ------------------------------------------------------------- Formen -----
+# ------------------------------------------------------------- Shapes -----
 
 def mirror(pts):
     return [(x, -y) for x, y in reversed(pts)]
@@ -91,15 +91,15 @@ def scaled(pts, k):
     return [(x * k, y * k) for x, y in pts]
 
 
-# Rumpf: spitze Nase vorne, breiter Brustpanzer, schmal zum Heck
+# Hull: pointed nose, wide chest plate, narrow towards the stern
 HULL = [(100, 0), (62, 14), (30, 26), (-10, 30), (-38, 22), (-52, 10), (-56, 0),
         (-52, -10), (-38, -22), (-10, -30), (30, -26), (62, -14)]
 
-# Scherenarm oben (unten gespiegelt): Schulter -> Unterarm -> zweiteilige Schere
+# Upper pincer arm (mirrored below): shoulder -> forearm -> two-part claw
 CLAW = [(12, 20), (2, 40), (10, 48), (22, 62), (52, 70), (84, 64), (104, 50), (110, 38),
         (96, 42), (90, 36), (98, 30), (82, 32), (72, 44), (48, 50), (32, 44), (30, 30)]
 
-# Heckpanzer-Segmente (Schwanz nach hinten, endet im Stachel)
+# Tail segments (pointing back, ending in the stinger)
 TAIL_SEGMENTS = [(-66, 16), (-84, 13), (-100, 10)]
 STINGER = [(-108, 9), (-128, 10), (-140, 2), (-134, -2), (-124, 3), (-110, -6)]
 
@@ -117,28 +117,28 @@ def draw_ship(c, detail=True):
     c.fill(mirror(ENGINE), 1.0)
     if not detail:
         return
-    # halbtransparente Panzerplatten und Fugen fuer Tiefe
+    # translucent armor plates and seams for depth
     c.fill([(70, 0), (40, 12), (0, 16), (-30, 10), (-30, -10), (0, -16), (40, -12)], 0.55)
-    c.fill([(48, 0), (20, 7), (-14, 6), (-14, -6), (20, -7)], 1.0)          # Cockpit-Grat
+    c.fill([(48, 0), (20, 7), (-14, 6), (-14, -6), (20, -7)], 1.0)          # cockpit ridge
     for claw in (CLAW, mirror(CLAW)):
         sgn = 1 if claw is CLAW else -1
         c.fill([(x, sgn * y) for x, y in [(30, 50), (50, 58), (78, 56), (90, 50), (62, 50), (40, 46)]], 0.5)
     for x, r in TAIL_SEGMENTS:
         c.fill(thick_line((x + r - 2, -r * 0.7), (x + r - 2, r * 0.7), 2.4), 0.25)
     for sgn in (1, -1):
-        c.fill(thick_line((22, sgn * 24), (-30, sgn * 20), 2.2), 0.3)        # Fugen am Brustpanzer
-        c.fill(thick_line((-40, sgn * 30), (-50, sgn * 38), 2.0), 0.35)      # Duesenrippen
+        c.fill(thick_line((22, sgn * 24), (-30, sgn * 20), 2.2), 0.3)        # chest plate seams
+        c.fill(thick_line((-40, sgn * 30), (-50, sgn * 38), 2.0), 0.35)      # engine ribs
 
 
 def force_armor(c):
-    # Sechseckiger Schild-Rahmen um das ganze Schiff (wie bei den Beispiel-Skins)
+    # Hexagonal force armor frame around the ship (like the sample skins)
     outer = [(150, 0), (78, 98), (-96, 98), (-162, 0), (-96, -98), (78, -98)]
     c.fill(outer, 1.0)
     c.fill(scaled(outer, 0.955), 0.0)
 
 
 def preview(path, w, h, layers):
-    """Vorschau: farbig getoent (wie Schildfarbe im Spiel) auf dunklem Grund."""
+    """Preview: tinted like the in-game shield color on a dark background."""
     tint = (90, 200, 255)
     bg = (14, 18, 30)
     rows = []
@@ -171,7 +171,7 @@ def main(out):
     draw_ship(drone, detail=False)
     drone.png(os.path.join(out, "skorpion_drone.png"))
 
-    # Vorschau in doppelter Groesse (nur zum Ansehen, nicht fuers Spiel)
+    # Preview at double size (for viewing only, not used in game)
     big_body = Canvas(600, 480, scale=2.0)
     draw_ship(big_body)
     big_force = Canvas(680, 440, scale=2.0)

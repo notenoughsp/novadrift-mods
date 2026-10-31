@@ -1,11 +1,11 @@
-"""Zeichnet die Animation des Schwanzhiebs (Stachelschwanz-Waffe) als Streifen.
+"""Draws the tail lash animation (stinger tail weapon) as a sprite strip.
 
-Segmentierter Skorpionschwanz, der vom Heck (Ursprung links) nach rechts ausschlaegt.
-Ueber die Frames: eingerollt ausholen -> voll durchgestreckt zuschlagen -> zur anderen
-Seite einrollen, wie eine Peitsche. Weiss gezeichnet, Farbe kommt im Spiel ueber image_blend.
-Ein Frame (16 Bilder): 220x130, Ursprung (12, 65), Richtung 0 Grad = nach rechts.
-Ausgabe: stachelschwanz_whip.png (FRAMES Bilder nebeneinander, fuer sprite_add mit imgnum)
-Aufruf: python -I draw_whip_sprite.py <ausgabeordner>
+A segmented scorpion tail lashing out from the stern (origin left) to the right.
+Over the frames: curled wind-up -> fully stretched strike -> curl to the other side,
+like a whip. Drawn in white, the game colors it via image_blend.
+One frame (16 total): 220x130, origin (12, 65), 0 degrees = right.
+Output: stachelschwanz_whip.png (FRAMES frames side by side, for sprite_add with imgnum)
+Usage:  python -I draw_whip_sprite.py <output_dir>
 """
 import math
 import os
@@ -30,14 +30,14 @@ def mask(draw):
 
 
 def to_canvas(x, y):
-    # Sprite-Koordinaten (Ursprung links Mitte, y nach oben) -> Canvas (Mitte = 0,0)
+    # Sprite coordinates (origin left middle, y up) -> canvas (center = 0,0)
     return x + OX - W / 2, y
 
 
 def tail_path(f):
-    """Glieder (x, y, r) und Endrichtung fuer Animationsphase f in [0, 1]."""
-    extend = 0.62 + 0.38 * math.sin(math.pi * f)  # holt aus, streckt sich, zieht zurueck
-    curl = 2.4 * (0.5 - f) * 2                    # eingerollt -> gerade -> andersherum eingerollt
+    """Segments (x, y, r) and end heading for animation phase f in [0, 1]."""
+    extend = 0.62 + 0.38 * math.sin(math.pi * f)  # winds up, stretches, pulls back
+    curl = 2.4 * (0.5 - f) * 2                    # curled -> straight -> curled the other way
     step = LENGTH * extend / (SEGMENTS - 1)
     x, y, heading = 6.0, 0.0, -curl * 0.25
     out = []
@@ -60,7 +60,7 @@ def tail(c, f):
     for x, y, r in segs:
         c.fill(circle(*to_canvas(x, y), r), 1.0)
     x, y, _ = segs[-1]
-    # Giftblase und eingerollter Stachel in Richtung des letzten Glieds
+    # venom bulb and curled stinger along the last segment
     c.fill(circle(*to_canvas(x + math.cos(heading) * 10, y + math.sin(heading) * 10), 10), 1.0)
     sting = [(16, 8), (30, 9), (40, 15), (45, 23), (36, 14), (27, 2), (14, -8)]
     c.fill(rotated(sting, x, y, heading), 1.0)
@@ -77,7 +77,7 @@ def seams(c, f):
 def frame(f):
     body = mask(lambda c: tail(c, f))
     seam = mask(lambda c: seams(c, f)) * body
-    # breiter Leuchtsaum; er zaehlt im Spiel zur Kollisionsmaske (whip_mask_tolerance)
+    # wide glow; counts towards the in-game collision mask (whip_mask_tolerance)
     glow = np.clip(blur(body, 8) * 1.5, 0, 1) * 0.55
     alpha = np.maximum(body, glow)
     gray = np.clip(1.0 - seam * 0.45, 0, 1) * body + 0.85 * (1 - body)

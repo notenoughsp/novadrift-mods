@@ -1,7 +1,7 @@
-"""Zeichnet das Hex-Icon des Stachelschwanzes im Stil der Nova-Drift-Waffen-Icons (268x308).
+"""Draws the stinger tail hex icon in the style of Nova Drift weapon icons (268x308).
 
-Aufruf: python -I draw_tail_icon.py <ausgabeordner>
-Ausgabe: stachelschwanz_icon.png
+Usage:  python -I draw_tail_icon.py <output_dir>
+Output: stachelschwanz_icon.png
 """
 import math
 import os
@@ -15,7 +15,7 @@ from draw_skorpion import circle, write_png  # noqa: E402
 
 
 def tail_points():
-    """Bogen von unten links nach oben rechts, Segmente werden zur Spitze kleiner."""
+    """Arc from bottom left to top right, segments shrink towards the tip."""
     path = [(-20, -118), (-30, -90), (-36, -60), (-36, -30), (-30, 0), (-18, 28), (0, 52), (22, 70), (46, 78),
             (68, 72), (82, 56)]
     return [(x, y, 21 - 11 * i / (len(path) - 1)) for i, (x, y) in enumerate(path)]
@@ -25,7 +25,7 @@ def tail(c):
     for x, y, r in tail_points():
         c.fill(circle(x, y, r), 1.0)
     x, y, _ = tail_points()[-1]
-    # Stachel: nach unten links gebogene Spitze (Schlagrichtung)
+    # Stinger: tip curved down-left (strike direction)
     c.fill([(x - 8, y + 4), (x + 10, y + 2), (x + 6, y - 22), (x - 10, y - 46), (x - 6, y - 20)], 1.0)
 
 

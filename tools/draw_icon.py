@@ -1,7 +1,7 @@
-"""Zeichnet das Hex-Icon des Skorpions im Stil der Nova-Drift-Gear-Icons (268x308).
+"""Draws the Skorpion hex icon in the style of Nova Drift gear icons (268x308).
 
-Aufruf: python -I draw_icon.py <ausgabeordner>
-Ausgabe: skorpion_icon.png
+Usage:  python -I draw_icon.py <output_dir>
+Output: skorpion_icon.png
 """
 import math
 import os
@@ -57,7 +57,7 @@ def nebula(seed=7):
 
 
 def ship(c):
-    # Skorpion aus draw_skorpion, um 90 Grad gedreht (Nase nach oben) und skaliert
+    # Skorpion from draw_skorpion, rotated 90 degrees (nose up) and scaled
     k = 0.8
 
     def rot(pts):
@@ -113,7 +113,7 @@ def main(out):
     rgb = rgb * (1 - detail_line[..., None]) + np.array([170, 235, 255]) * detail_line[..., None]
 
     border = np.clip(hex_outer - hex_inner, 0, 1)
-    rgb = rgb * (1 - border[..., None])  # schwarzer Rand
+    rgb = rgb * (1 - border[..., None])  # black border
     alpha = hex_outer * 255
 
     img = np.dstack([np.clip(rgb, 0, 255), alpha]).astype(np.uint8)

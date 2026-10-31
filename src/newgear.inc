@@ -1,9 +1,9 @@
-// ------------------------------------------------------------ Neue Gear -----
-// Ungenutzte Upgrade-Objekte dienen als Auswahl-IDs (gBeam: Body, mRanger: Waffe).
-// Gewaehlt fuehren sie das Verhalten einer Basis-Ausruestung aus, damit jede
-// Spielfunktion sie kennt; ein Flag schaltet Texte, Icon, Werte und Skin um.
-// INI: [newbody]/[newweapon] (Texte), [body.<name>]/[weapon.<name>] (Werte).
-// Runtime-Helfer sind nur fuer Spielversion 1.2.38.4 verifiziert.
+// ------------------------------------------------------------- New gear -----
+// Unused upgrade objects serve as selection IDs (gBeam: body, mRanger: weapon).
+// When picked they run a base gear's behavior so every game function knows them;
+// a flag switches texts, icon, values and skin.
+// INI: [newbody]/[newweapon] (texts), [body.<name>]/[weapon.<name>] (values).
+// Runtime helpers are only verified for game version 1.2.38.4.
 
 typedef void (*AssignFn)(RValue *dst, const RValue *src);
 typedef void (*MakeStringFn)(RValue *out, const char *utf8);
@@ -22,15 +22,15 @@ static const Helper HELPERS[] = {
     { "setBuiltinVar", 0xf17460, "\x48\x89\x5c\x24\x08\x48\x89\x6c\x24\x10\x48\x89\x74\x24\x18" },
 };
 
-// Setzt eingebaute Instanzvariablen (sprite_index, image_blend, ...)
+// Sets built-in instance variables (sprite_index, image_blend, ...)
 typedef void (*SetBuiltinVarFn)(void *inst, int id, int array_index, RValue *value);
 static SetBuiltinVarFn g_set_builtin_var;
-static void *g_powers;  // oPowers-Instanz des laufenden Runs (Build und Werte)
+static void *g_powers;  // oPowers instance of the current run (build and stats)
 
 static void *resolve_helper(const Helper *h) {
     uint8_t *p = (uint8_t *)GetModuleHandleW(NULL) + h->rva;
     if (!in_range(g_text, p) || memcmp(p, h->bytes, strlen(h->bytes))) {
-        logf_("Neue Gear: Helfer %s passt nicht zu dieser Spielversion", h->name);
+        logf_("New gear: helper %s does not match this game version", h->name);
         return NULL;
     }
     return p;
@@ -59,17 +59,17 @@ static RValue *make_real(RValue *rv, double v) {
 }
 
 typedef struct {
-    const char *section;    // INI-Abschnitt mit Texten
-    const char *kind;       // "body" / "weapon" (Werte-Abschnitt [kind.<name>])
-    const char *id_object;  // ungenutztes Upgrade-Objekt als Auswahl-ID
-    const char *list_var;   // Auswahlliste in oPowers
-    int id, base;           // Objektindizes: Auswahl-ID, Basis-Gear (gX)
-    int base_type;          // bodyType bzw. Objektindex der Basiswaffe (oX)
-    int selected;           // in diesem Run gewaehlt
-    int applied;            // Werte-Abschnitt gerade aktiv (fuer Wiederherstellung)
+    const char *section;    // INI section with texts
+    const char *kind;       // "body" / "weapon" (value section [kind.<name>])
+    const char *id_object;  // unused upgrade object used as selection ID
+    const char *list_var;   // selection list in oPowers
+    int id, base;           // object indices: selection ID, base gear (gX)
+    int base_type;          // bodyType or object index of the base weapon (oX)
+    int selected;           // picked in this run
+    int applied;            // value section currently applied (for restoring)
     GmlEventFn o_id_create, o_id_alarm, o_base_create, o_base_alarm;
     RValue icon;
-    int icon_state;         // 0 = ungeladen, 1 = geladen, -1 = Fehler
+    int icon_state;         // 0 = not loaded, 1 = loaded, -1 = failed
     struct { char name[64]; double value; } saved[32];
     int saved_count;
 } NewGear;
@@ -90,7 +90,7 @@ static int gear_active(NewGear *g, void *self) {
     return gear_enabled(g) && g->selected && gear_type_now(g, self) == g->base_type;
 }
 
-// Werte-Abschnitt anwenden; Originalwerte werden beim ersten Mal gesichert
+// Apply the value section; original values are saved on first use
 static void gear_apply(NewGear *g, void *self, int verbose) {
     char sec[96];
     snprintf(sec, sizeof sec, "%s.%s", g->kind, gear_text(g, "name"));
@@ -115,7 +115,7 @@ static void gear_restore(NewGear *g, void *self) {
     g->applied = 0;
 }
 
-// Vor assignBaseStats: Grundwerte (z. B. dartBaseDamage) setzen, die das Spiel dort verrechnet
+// Before assignBaseStats: set base values (e.g. blasterBaseDamage) the game folds in there
 static void gear_pre_assign(void *self) {
     for (int i = 0; i < 2; i++) {
         if (gear_active(&g_gear[i], self)) gear_apply(&g_gear[i], self, 0);
@@ -123,7 +123,7 @@ static void gear_pre_assign(void *self) {
     }
 }
 
-// Upgrade-Info-Funktionen: fuer neue Gear wie die Basis-Gear antworten
+// Upgrade info functions: answer for new gear like its base gear
 #define UPGRADE_HOOKS(X) \
     X(FullString) X(HexGroup) X(HexSlot) X(IsRecursive) X(IsSuper) X(IsTier1) X(ShortString) \
     X(Sprite) X(SuperModList) X(SuperModSprites) X(TagList) X(TitleString) X(UnlockString)
@@ -132,13 +132,13 @@ static void gear_pre_assign(void *self) {
 UPGRADE_HOOKS(X)
 #undef X
 
-// Ruft orig auf; ist argv[0] eine neue Gear, mit ihrer Basis als Ersatz. Liefert die Gear oder NULL.
+// Calls orig; if argv[0] is new gear, its base is passed instead. Returns the gear or NULL.
 static NewGear *call_upgrade(GmlFn orig, void *self, void *other, void *ret, int argc, void **argv, void **res) {
     for (int i = 0; i < 2 && argc >= 1 && argc <= 8; i++) {
         NewGear *g = &g_gear[i];
         if (!gear_enabled(g)) continue;
-        // Fragt die Anzeige nach der Basis, waehrend die neue Gear aktiv ist (z. B. Pause-Menue,
-        // Gear-Liste), antworten wir als neue Gear. Die Basis selbst bietet das Spiel nie an.
+        // UI asking for the base while the new gear is active (pause menu, gear list) gets
+        // the new gear's answer. The game never offers the base gear itself.
         if (g_powers && is_obj_ref(argv[0], g->base) && gear_active(g, g_powers)) {
             *res = orig(self, other, ret, argc, argv);
             return g;
@@ -155,7 +155,7 @@ static NewGear *call_upgrade(GmlFn orig, void *self, void *other, void *ret, int
     return NULL;
 }
 
-// Ersetzt den Rueckgabe-String; Sprache wird am Original-Text der Basis erkannt
+// Replaces the returned string; language is detected from the base gear's text
 static void replace_text(NewGear *g, RValue *ret, const char *key) {
     char k[40];
     const char *orig = (ret->kind & 0xffffff) == 1 && ret->ptr ? *(const char **)ret->ptr : "";
@@ -165,7 +165,7 @@ static void replace_text(NewGear *g, RValue *ret, const char *key) {
     const char *text = gear_text(g, k);
     if (!text) text = gear_text(g, key);
     if (!text) return;
-    // GML-Strings einmal anlegen und wiederverwenden (die Getter laufen jeden Frame)
+    // Create GML strings once and reuse them (the getters run every frame)
     static struct { const char *src; RValue rv; } cache[32];
     int i = 0;
     while (i < 32 && cache[i].src && cache[i].src != text) i++;
@@ -197,7 +197,7 @@ TEXT_HOOK(FullString, "full")
 PLAIN_HOOK(HexGroup) PLAIN_HOOK(HexSlot) PLAIN_HOOK(IsRecursive) PLAIN_HOOK(IsSuper) PLAIN_HOOK(IsTier1)
 PLAIN_HOOK(SuperModList) PLAIN_HOOK(SuperModSprites) PLAIN_HOOK(TagList) PLAIN_HOOK(UnlockString)
 
-// Eigenes Hex-Icon: einmal per sprite_add laden (Ursprung oben links wie die Originale)
+// Custom hex icon: loaded once via sprite_add (origin top left like the originals)
 static void *hk_up_Sprite(void *self, void *other, void *ret, int argc, void **argv) {
     void *r;
     NewGear *g = call_upgrade(o_up_Sprite, self, other, ret, argc, argv, &r);
@@ -205,7 +205,7 @@ static void *hk_up_Sprite(void *self, void *other, void *ret, int argc, void **a
     if (!file || g->icon_state < 0) return r;
     if (!g->icon_state) {
         int add_id = builtin_id("sprite_add");
-        if (add_id < 0) { g->icon_state = -1; logf_("Neue Gear: sprite_add nicht gefunden"); return r; }
+        if (add_id < 0) { g->icon_state = -1; logf_("New gear: sprite_add not found"); return r; }
         RValue a[6];
         g_make_string(&a[0], file);
         make_real(&a[1], 1);
@@ -218,14 +218,14 @@ static void *hk_up_Sprite(void *self, void *other, void *ret, int argc, void **a
         double idx = -1;
         rv_get(&g->icon, &idx);
         g->icon_state = idx >= 0 ? 1 : -1;
-        logf_("Neue Gear: Icon %s geladen -> Sprite %g", file, idx);
+        logf_("New gear: icon %s loaded -> sprite %g", file, idx);
         if (g->icon_state < 0) return r;
     }
     g_assign(ret, &g->icon);
     return r;
 }
 
-// bodyEnumToUpgrade / weaponObjectToUpgrade: Basis -> neue Gear, solange sie gewaehlt ist
+// bodyEnumToUpgrade / weaponObjectToUpgrade: base -> new gear while it is picked
 static GmlFn o_body_to_upgrade, o_weapon_to_upgrade;
 
 static void map_to_new(NewGear *g, void *ret) {
@@ -244,8 +244,8 @@ static void *hk_weapon_to_upgrade(void *self, void *other, void *ret, int argc, 
     return r;
 }
 
-// Events: Auswahl-ID fuehrt das Basis-Verhalten aus und markiert die neue Gear,
-// die echte Basis-Gear hebt die Markierung wieder auf.
+// Events: the selection ID runs the base behavior and flags the new gear;
+// the real base gear clears the flag.
 #define GEAR_EVENTS(i) \
     static void hk_id_create_##i(void *self, void *other) { \
         NewGear *g = &g_gear[i]; \
@@ -257,7 +257,7 @@ static void *hk_weapon_to_upgrade(void *self, void *other, void *ret, int argc, 
         NewGear *g = &g_gear[i]; \
         if (!gear_enabled(g)) { g->o_id_alarm(self, other); return; } \
         g->selected = 1; \
-        logf_("Neue Gear gewaehlt: %s", gear_text(g, "name")); \
+        logf_("New gear picked: %s", gear_text(g, "name")); \
         g->o_base_alarm(self, other); \
     } \
     static void hk_base_create_##i(void *self, void *other) { \
@@ -271,7 +271,7 @@ static void *hk_weapon_to_upgrade(void *self, void *other, void *ret, int argc, 
 GEAR_EVENTS(0)
 GEAR_EVENTS(1)
 
-// Run-Start: neue Gear in die Auswahllisten (gearBodies / gearWeapons) aufnehmen
+// Run start: add new gear to the selection lists (gearBodies / gearWeapons)
 static GmlEventFn o_powers_create;
 
 static void hk_powers_create(void *self, void *other) {
@@ -285,17 +285,17 @@ static void hk_powers_create(void *self, void *other) {
         if (!gear_enabled(g)) continue;
         int list_id = var_id(g->list_var);
         if (list_id < 0 || add_id < 0) {
-            logf_("Neue Gear: %s (%d) / ds_list_add (%d) nicht gefunden", g->list_var, list_id, add_id);
+            logf_("New gear: %s (%d) / ds_list_add (%d) not found", g->list_var, list_id, add_id);
             continue;
         }
         RValue item = obj_ref(g->id), res = { 0 };
         RValue *args[2] = { g_get_ref(self, list_id), &item };
         g_call_builtin(self, other, &res, 2, add_id, args);
-        logf_("Neue Gear '%s' zur Auswahl (%s) hinzugefuegt", gear_text(g, "name"), g->list_var);
+        logf_("New gear '%s' added to selection (%s)", gear_text(g, "name"), g->list_var);
     }
 }
 
-// Aussehen: Skin des neuen Bodys aktivieren, solange er gewaehlt ist
+// Looks: enable the new body's skin while it is picked
 static GmlFn g_set_skin_data, o_save_settings;
 static int g_skin_active, g_skin_index = -1;
 static double g_user_skin;
@@ -306,7 +306,7 @@ static int skin_row(const char *name) {
     FILE *f = _wfopen(path, L"r");
     if (!f || !name) { if (f) fclose(f); return -1; }
     char line[512];
-    int row = -1, found = -1;  // Kopfzeile = -1, erste Skin-Zeile = 0
+    int row = -1, found = -1;  // header = -1, first skin row = 0
     while (fgets(line, sizeof line, f)) {
         char *comma = strchr(line, ',');
         if (comma && row >= 0 && (size_t)(comma - line) == strlen(name) && !strncmp(line, name, comma - line)) {
@@ -316,7 +316,7 @@ static int skin_row(const char *name) {
         row++;
     }
     fclose(f);
-    return found < 0 ? -1 : found + 1;  // global.customSkin ist 1-basiert
+    return found < 0 ? -1 : found + 1;  // global.customSkin is 1-based
 }
 
 static void set_skin(void *self, void *other, int active) {
@@ -324,7 +324,7 @@ static void set_skin(void *self, void *other, int active) {
     if (!rv || !g_set_skin_data) return;
     if (active) {
         if (g_skin_index < 0) g_skin_index = skin_row(gear_text(&g_gear[0], "skin"));
-        if (g_skin_index < 0) { logf_("Neuer Body: Skin nicht in custom_skins.csv gefunden"); return; }
+        if (g_skin_index < 0) { logf_("New body: skin not found in custom_skins.csv"); return; }
         rv_get(rv, &g_user_skin);
         g_set_real(rv, g_skin_index);
     } else
@@ -332,7 +332,7 @@ static void set_skin(void *self, void *other, int active) {
     g_skin_active = active;
     RValue res = { 0 };
     g_set_skin_data(self, other, &res, 0, NULL);
-    logf_("Neuer Body: Skin %s (customSkin=%g)", active ? "aktiviert" : "zurueckgesetzt",
+    logf_("New body: skin %s (customSkin=%g)", active ? "enabled" : "restored",
           active ? (double)g_skin_index : g_user_skin);
 }
 
@@ -340,7 +340,7 @@ static void update_skin(void *self, void *other, int want) {
     if (want != g_skin_active) set_skin(self, other, want);
 }
 
-// Einstellungen speichern: die eigene Skin-Wahl sichern, nicht den Skin des neuen Bodys
+// Saving settings: store the player's own skin choice, not the new body's skin
 static void *hk_save_settings(void *self, void *other, void *ret, int argc, void **argv) {
     RValue *rv = g_skin_active ? global_ref("customSkin") : NULL;
     double cur = 0;
@@ -357,12 +357,12 @@ static GmlEventFn hook_event(const char *object, const char *event, void *detour
     return (GmlEventFn)hook(find_gml_function(fn), detour, label);
 }
 
-// Eigenes Aussehen der Schuesse: [newweapon] shot=<png>, shot_origin_x/y, shot_color=RRGGBB
+// Custom shot look: [newweapon] shot=<png>, shot_origin_x/y, shot_color
 static GmlEventFn o_shot_create;
 static RValue g_shot_sprite;
-static int g_shot_state;  // 0 = ungeladen, 1 = geladen, -1 = Fehler
+static int g_shot_state;  // 0 = not loaded, 1 = loaded, -1 = failed
 
-// Farbwert fuer image_blend: "shield" = Schildfarbe des Spielers, sonst RRGGBB (siehe whip.inc)
+// image_blend value: "shield" = player's shield color, else RRGGBB (see whip.inc)
 static int resolve_color(void *self, void *other, const char *spec, double *blend);
 
 static void set_builtin(void *inst, const char *name, RValue *value) {
@@ -390,7 +390,7 @@ static void hk_shot_create(void *self, void *other) {
         double idx = -1;
         rv_get(&g_shot_sprite, &idx);
         g_shot_state = idx >= 0 ? 1 : -1;
-        logf_("Neue Gear: Schuss-Sprite %s geladen -> Sprite %g", file, idx);
+        logf_("New gear: shot sprite %s loaded -> sprite %g", file, idx);
         if (g_shot_state < 0) return;
     }
     set_builtin(self, "sprite_index", &g_shot_sprite);
@@ -406,9 +406,9 @@ static void install_newgear(void) {
     g_make_string = (MakeStringFn)resolve_helper(&HELPERS[1]);
     g_call_builtin = (CallBuiltinFn)resolve_helper(&HELPERS[2]);
     g_set_builtin_var = (SetBuiltinVarFn)resolve_helper(&HELPERS[3]);
-    if (!g_assign || !g_make_string || !g_call_builtin) { logf_("Neue Gear: deaktiviert"); return; }
+    if (!g_assign || !g_make_string || !g_call_builtin) { logf_("New gear: disabled"); return; }
 
-    // Basis: Body immer Standardform, Waffe aus [newweapon] base=<Name> (z. B. Dart)
+    // Base: body is always the standard form, weapon comes from [newweapon] base=<name>
     static char weapon_base[64];
     const char *wb = gear_text(&g_gear[1], "base");
     snprintf(weapon_base, sizeof weapon_base, "%s", wb ? wb : "");
@@ -428,7 +428,7 @@ static void install_newgear(void) {
             g->base_type = find_object(weapon_obj);
         }
         if (g->id < 0 || g->base < 0 || g->base_type < 0) {
-            logf_("Neue Gear %s: Objekte nicht gefunden (%s/%s)", gear_text(g, "name"), g->id_object, base_obj);
+            logf_("New gear %s: objects not found (%s/%s)", gear_text(g, "name"), g->id_object, base_obj);
             g->id = -1;
             continue;
         }
@@ -437,7 +437,7 @@ static void install_newgear(void) {
         g->o_id_create = hook_event(g->id_object, "Create_0", id_create[i]);
         g->o_id_alarm = hook_event(g->id_object, "Alarm_0", id_alarm[i]);
         if (!g->o_base_create || !g->o_base_alarm || !g->o_id_create || !g->o_id_alarm) g->id = -1;
-        // Projektil der Basiswaffe (oX) einfaerben/ersetzen
+        // Recolor/replace the base weapon's projectile (oX)
         if (i == 1 && g->id >= 0 && gear_text(g, "shot") && g_set_builtin_var) {
             char shot_obj[80];
             snprintf(shot_obj, sizeof shot_obj, "o%s", bases[i]);
@@ -455,11 +455,11 @@ static void install_newgear(void) {
     o_save_settings = hook(find_gml_function("gml_Script_saveSettings"), hk_save_settings, "saveSettings");
 }
 
-// Nach assignBaseStats: Werte der aktiven neuen Gear anwenden. Liefert 1, wenn aktiv.
+// After assignBaseStats: apply the active new gear's values. Returns 1 if active.
 static int newgear_post_assign(void *self, int which, int verbose) {
     NewGear *g = &g_gear[which];
     if (!gear_active(g, self)) return 0;
-    if (verbose) logf_("  Neue Gear aktiv: %s", gear_text(g, "name"));
+    if (verbose) logf_("  New gear active: %s", gear_text(g, "name"));
     gear_apply(g, self, verbose);
     return 1;
 }

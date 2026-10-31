@@ -1,8 +1,8 @@
-"""Zeichnet das Projektil-Sprite des Stachelschwanzes (Ersatz fuer sDefaultWeapon).
+"""Draws the stinger tail projectile sprite (replaces sDefaultWeapon).
 
-Gleiches Format wie das Original: 201x80, Ursprung (160, 40), Flugrichtung nach rechts.
-Weiss/grau gezeichnet, die Farbe kommt im Spiel ueber image_blend.
-Aufruf: python -I draw_stinger_shot.py <ausgabeordner>
+Same format as the original: 201x80, origin (160, 40), flying to the right.
+Drawn in white/grey, the game colors it via image_blend.
+Usage: python -I draw_stinger_shot.py <output_dir>
 """
 import os
 import sys
@@ -23,8 +23,8 @@ def mask(draw):
 
 
 def at(pts):
-    # Canvas-Koordinaten: Mitte = (0,0), y nach oben -> auf Ursprung (160,40) verschieben
-    k = 1.5  # Kopf etwa so gross wie beim Original-Schuss
+    # Canvas coordinates: center = (0,0), y up -> shift to origin (160,40)
+    k = 1.5  # head about the size of the original shot
     return [(x * k + OX - W / 2, y * k) for x, y in pts]
 
 

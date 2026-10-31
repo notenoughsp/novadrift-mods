@@ -1,6 +1,6 @@
-; Alle Werte, die initializeVariables setzt (Spielversion 1.2.38.4)
-; Diese Namen funktionieren im Abschnitt [vars] der novadrift_mods.ini.
-; Name = Standardwert
+; All values set by initializeVariables (game version 1.2.38.4)
+; Use these names in the [vars] section of novadrift_mods.ini.
+; name = default value
 
 advancedEngineeringAddedLimit = 1
 aegisDuration = 2.5

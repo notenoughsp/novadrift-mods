@@ -1,5 +1,5 @@
-"""Schneidet ein Sprite aus data.win aus (DXT5-Texturseiten) und speichert es als PNG.
-Aufruf: python -I extract_sprite.py <data.win> <ausgabeordner> <spritename> [...]
+"""Extracts a sprite from data.win (DXT5 texture pages) and saves it as PNG.
+Usage: python -I extract_sprite.py <data.win> <output_dir> <sprite_name> [...]
 """
 import os
 import struct
