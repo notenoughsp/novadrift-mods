@@ -326,13 +326,108 @@ static const char *gear_text_get(const char *section, const char *key) {
     return NULL;
 }
 
-// Parses an INI file; profile=<name> in [settings] also loads
-// novadrift_profiles\<name>.ini (profiles cannot load further profiles).
-static int parse_ini(const wchar_t *path, int allow_profile) {
-    FILE *f = _wfopen(path, L"r");
-    if (!f) return 0;
+// ------------------------------------------------------- Embedded files ----
+// Built into the DLL at compile time (paths relative to the repo root), so
+// copying version.dll is the whole installation.
+
+#define EMBED(sym, path) \
+    __asm__(".section .rdata,\"dr\"\n" #sym ":\n.incbin \"" path "\"\n" #sym "_end:\n.byte 0\n.text\n"); \
+    extern const char sym[], sym##_end[];
+
+EMBED(emb_ini_template, "novadrift_mods.ini")
+EMBED(emb_scorpion_ini, "profiles/scorpion/scorpion.ini")
+EMBED(emb_scorpion_png, "profiles/scorpion/skin/scorpion.png")
+EMBED(emb_scorpion_force_png, "profiles/scorpion/skin/scorpion_force.png")
+EMBED(emb_scorpion_drone_png, "profiles/scorpion/skin/scorpion_drone.png")
+EMBED(emb_scorpion_icon_png, "profiles/scorpion/skin/scorpion_icon.png")
+EMBED(emb_stinger_icon_png, "profiles/scorpion/skin/stinger_icon.png")
+EMBED(emb_stinger_shot_png, "profiles/scorpion/skin/stinger_shot.png")
+EMBED(emb_stinger_whip_png, "profiles/scorpion/skin/stinger_whip.png")
+
+typedef struct { const wchar_t *path; const char *data, *end; } EmbeddedFile;
+#define FILE_ENTRY(name, sym) { L"custom_skins\\" name, sym, sym##_end }
+static const EmbeddedFile SCORPION_FILES[] = {
+    FILE_ENTRY(L"scorpion.png", emb_scorpion_png),
+    FILE_ENTRY(L"scorpion_force.png", emb_scorpion_force_png),
+    FILE_ENTRY(L"scorpion_drone.png", emb_scorpion_drone_png),
+    FILE_ENTRY(L"scorpion_icon.png", emb_scorpion_icon_png),
+    FILE_ENTRY(L"stinger_icon.png", emb_stinger_icon_png),
+    FILE_ENTRY(L"stinger_shot.png", emb_stinger_shot_png),
+    FILE_ENTRY(L"stinger_whip.png", emb_stinger_whip_png),
+};
+static int g_builtin_profile;  // the built-in scorpion profile is active
+
+static void game_path(wchar_t *out, const wchar_t *rel) { swprintf(out, MAX_PATH, L"%ls\\%ls", g_dir, rel); }
+
+// Writes the file if it is missing or differs in size
+static void write_if_changed(const wchar_t *rel, const char *data, size_t len) {
+    wchar_t path[MAX_PATH];
+    game_path(path, rel);
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (GetFileAttributesExW(path, GetFileExInfoStandard, &a) && !a.nFileSizeHigh && a.nFileSizeLow == len) return;
+    FILE *f = _wfopen(path, L"wb");
+    if (!f) { logf_("ERROR: cannot write %ls", path); return; }
+    fwrite(data, 1, len, f);
+    fclose(f);
+    logf_("Wrote %ls", rel);
+}
+
+static char *read_file(const wchar_t *path) {
+    FILE *f = _wfopen(path, L"rb");
+    if (!f) return NULL;
+    fseek(f, 0, SEEK_END);
+    long n = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *buf = malloc(n + 1);
+    buf[fread(buf, 1, n, f)] = 0;
+    fclose(f);
+    return buf;
+}
+
+// First start: default settings file
+static void install_settings_file(void) {
+    wchar_t path[MAX_PATH];
+    game_path(path, L"novadrift_mods.ini");
+    if (GetFileAttributesW(path) == INVALID_FILE_ATTRIBUTES)
+        write_if_changed(L"novadrift_mods.ini", emb_ini_template, emb_ini_template_end - emb_ini_template);
+}
+
+// Built-in profile: graphics and custom skin row (the game reads them after startup)
+static void install_profile_files(void) {
+    if (!g_builtin_profile) return;
+    wchar_t path[MAX_PATH];
+    game_path(path, L"custom_skins");
+    CreateDirectoryW(path, NULL);
+    for (size_t i = 0; i < sizeof SCORPION_FILES / sizeof *SCORPION_FILES; i++)
+        write_if_changed(SCORPION_FILES[i].path, SCORPION_FILES[i].data, SCORPION_FILES[i].end - SCORPION_FILES[i].data);
+
+    const char *row = gear_text_get("newbody", "skin_row");
+    if (!row || !strchr(row, ',')) return;
+    game_path(path, L"custom_skins\\custom_skins.csv");
+    char *csv = read_file(path);
+    size_t name_len = strchr(row, ',') - row;
+    for (char *l = csv; l && *l; l += strcspn(l, "\n"), l += *l == '\n')
+        if (!strncmp(l, row, name_len + 1)) { free(csv); return; }  // already listed
+    FILE *f = _wfopen(path, L"ab");
+    if (!f) { free(csv); return; }
+    if (!csv) fputs("name,body_artwork,body_force_armor_artwork,drone_artwork,jet_angle,jet_distance\r\n", f);
+    else if (*csv && csv[strlen(csv) - 1] != '\n') fputs("\r\n", f);
+    fprintf(f, "%s\r\n", row);
+    fclose(f);
+    free(csv);
+    logf_("Added custom skin row: %.*s", (int)name_len, row);
+}
+
+static int parse_ini(const wchar_t *path, int allow_profile);
+
+// Parses INI text; profile=<name> in [settings] also loads novadrift_profiles\<name>.ini,
+// or the built-in profile (profiles cannot load further profiles).
+static int parse_ini_text(const char *text, int allow_profile) {
     char line[512], section[32] = "";
-    while (fgets(line, sizeof line, f)) {
+    for (const char *p = text; *p;) {
+        size_t n = strcspn(p, "\n");
+        snprintf(line, sizeof line, "%.*s", (int)(n < sizeof line ? n : sizeof line - 1), p);
+        p += n + (p[n] == '\n');
         char *c = strpbrk(line, ";#");
         if (c) *c = 0;
         trim(line);
@@ -359,7 +454,11 @@ static int parse_ini(const wchar_t *path, int allow_profile) {
             if (!_stricmp(key, "profile") && *val && allow_profile) {
                 wchar_t ppath[MAX_PATH];
                 swprintf(ppath, MAX_PATH, L"%ls\\novadrift_profiles\\%hs.ini", g_dir, val);
-                if (parse_ini(ppath, 0)) logf_("Profile loaded: %s", val);
+                if (!_stricmp(val, "scorpion")) {
+                    g_builtin_profile = 1;
+                    parse_ini_text(emb_scorpion_ini, 0);
+                    logf_("Profile loaded: %s (built in)", val);
+                } else if (parse_ini(ppath, 0)) logf_("Profile loaded: %s", val);
                 else logf_("ERROR: profile not found: %ls", ppath);
             }
             continue;
@@ -375,7 +474,14 @@ static int parse_ini(const wchar_t *path, int allow_profile) {
         o->value = v;
         o->slot = var_slot(key);
     }
-    fclose(f);
+    return 1;
+}
+
+static int parse_ini(const wchar_t *path, int allow_profile) {
+    char *text = read_file(path);
+    if (!text) return 0;
+    parse_ini_text(text, allow_profile);
+    free(text);
     return 1;
 }
 
@@ -387,6 +493,7 @@ static void load_ini(void) {
     wchar_t path[MAX_PATH];
     swprintf(path, MAX_PATH, L"%ls\\novadrift_mods.ini", g_dir);
     g_ovr_count = 0;
+    g_builtin_profile = 0;
     g_dump = 0;
     g_block_always = 1;
     if (parse_ini(path, 1)) logf_("novadrift_mods.ini loaded: %zu entries", g_ovr_count);
@@ -621,7 +728,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     logf_("Nova Drift mod loader started");
     load_object_names();
     install();
+    install_settings_file();
     load_ini();
+    install_profile_files();
     install_newgear();
     install_whip();
     logf_("Leaderboard block: %s", g_block_always ? "always on" : "only with modded values");
