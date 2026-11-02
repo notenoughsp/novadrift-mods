@@ -174,13 +174,11 @@ static int var_id(const char *name) {
     return s ? *s : -1;
 }
 
-// Variable / builtin ID with the lookup cached per call site (name must be a literal)
-#define CACHED_SLOT(find, name) ({ \
+// Variable ID with the lookup cached per call site (name must be a literal)
+#define VAR(name) ({ \
     static int32_t *slot_; static int tried_; \
-    if (!tried_) tried_ = 1, slot_ = find(name); \
+    if (!tried_) tried_ = 1, slot_ = var_slot(name); \
     slot_ ? *slot_ : -1; })
-#define VAR(name) CACHED_SLOT(var_slot, name)
-#define BI(name) CACHED_SLOT(builtin_slot, name)
 
 // GameMaker runtime RValue
 typedef struct { union { double real; int32_t i32; int64_t i64; void *ptr; }; uint32_t flags, kind; } RValue;
@@ -283,6 +281,7 @@ typedef struct { char section[32]; char name[64]; double value; int32_t *slot; }
 static Override *g_ovr;
 static size_t g_ovr_count, g_ovr_cap;
 static int g_dump, g_modded, g_block_always = 1;
+static int g_object_probe;  // spawn the oModProbe test object (objects.inc)
 
 static void trim(char *s) {
     char *e = s + strlen(s);
@@ -451,6 +450,7 @@ static int parse_ini_text(const char *text, int allow_profile) {
         if (!_stricmp(section, "settings")) {
             if (!_stricmp(key, "dump")) g_dump = atoi(val);
             if (!_stricmp(key, "block_leaderboards")) g_block_always = atoi(val);
+            if (!_stricmp(key, "object_probe")) g_object_probe = atoi(val);
             if (!_stricmp(key, "profile") && *val && allow_profile) {
                 wchar_t ppath[MAX_PATH];
                 swprintf(ppath, MAX_PATH, L"%ls\\novadrift_profiles\\%hs.ini", g_dir, val);
@@ -672,6 +672,7 @@ static void *hk_end_score(void *self, void *other, void *ret, int argc, void **a
 }
 
 #include "newgear.inc"
+#include "objects.inc"
 #include "whip.inc"
 
 static void install(void) {
@@ -732,6 +733,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     load_ini();
     install_profile_files();
     install_newgear();
+    install_objects();
     install_whip();
     logf_("Leaderboard block: %s", g_block_always ? "always on" : "only with modded values");
     return TRUE;

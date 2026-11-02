@@ -19,6 +19,7 @@ static MakeStringFn g_make_string;
 static CallBuiltinFn g_call_builtin;
 static SetBuiltinVarFn g_set_builtin_var;
 static void *g_powers;  // oPowers instance of the current run (build and stats)
+static void spawn_probe(void *self, void *other);  // objects.inc
 static int g_obj_player = -1;
 
 // GML "with" iterator: begin returns the instance count and sets *self per instance
@@ -90,13 +91,43 @@ static RValue *make_real(RValue *rv, double v) {
 // Constant GML string, created once per call site (s must be a literal)
 #define GSTR(s) ({ static RValue rv_; static int made_; if (!made_) made_ = 1, g_make_string(&rv_, s); rv_; })
 
-// Calls a builtin by index (see BI)
-static RValue call_bi(void *self, void *other, int id, int argc, RValue *args) {
+// Builtins the game calls by index have a slot in the variable table. Others
+// (YYC calls them directly) are found through their registration in the runtime:
+// lea rdx, <function>; lea rcx, "<name>"; ... call Function_Add
+typedef void (*BuiltinFn)(RValue *res, void *self, void *other, int argc, RValue *args);
+typedef struct { int32_t *slot; BuiltinFn fn; } Builtin;
+
+static BuiltinFn find_builtin_fn(const char *name) {
+    size_t len = strlen(name) + 1;
+    for (uint8_t *s = g_rdata.start + 1; s + len <= g_rdata.end; s++) {
+        if (*s != (uint8_t)*name || s[-1] || memcmp(s, name, len)) continue;
+        for (uint8_t *q = g_text.start + 7; q + 7 <= g_text.end; q++)
+            if (q[0] == 0x48 && q[1] == 0x8d && q[2] == 0x0d && rel32_target(q + 3) == s &&
+                q[-7] == 0x48 && q[-6] == 0x8d && q[-5] == 0x15)
+                return (BuiltinFn)rel32_target(q - 4);
+    }
+    return NULL;
+}
+
+static Builtin find_builtin(const char *name) {
+    Builtin b = { builtin_slot(name), NULL };
+    if (!b.slot) b.fn = find_builtin_fn(name);
+    if (!b.slot && !b.fn) logf_("ERROR: builtin %s not found", name);
+    return b;
+}
+
+// Builtin handle with the lookup cached per call site (name must be a literal)
+#define BI(name) ({ static Builtin b_; static int tried_; if (!tried_) tried_ = 1, b_ = find_builtin(name); b_; })
+
+static RValue call_bi(void *self, void *other, Builtin b, int argc, RValue *args) {
     RValue res = { .kind = 5 };  // undefined
-    if (id < 0) return res;
-    RValue *ptrs[10];
-    for (int k = 0; k < argc && k < 10; k++) ptrs[k] = &args[k];
-    g_call_builtin(self, other, &res, argc, id, ptrs);
+    if (b.slot && *b.slot >= 0) {
+        RValue *ptrs[10];
+        for (int k = 0; k < argc && k < 10; k++) ptrs[k] = &args[k];
+        g_call_builtin(self, other, &res, argc, *b.slot, ptrs);
+    } else if (b.fn) {
+        b.fn(&res, self, other, argc, args);
+    }
     return res;
 }
 
@@ -390,17 +421,17 @@ static void hk_powers_create(void *self, void *other) {
     for (int i = 0; i < 2; i++) g_gear[i].selected = 0, g_gear[i].applied = 0;
     o_powers_create(self, other);
     g_powers = self;
-    int add_id = BI("ds_list_add");
+    spawn_probe(self, other);
     for (int i = 0; i < 2; i++) {
         NewGear *g = &g_gear[i];
         if (!gear_enabled(g)) continue;
         int list_id = var_id(g->list_var);
-        if (list_id < 0 || add_id < 0) {
-            logf_("New gear: %s (%d) / ds_list_add (%d) not found", g->list_var, list_id, add_id);
+        if (list_id < 0) {
+            logf_("New gear: %s not found", g->list_var);
             continue;
         }
         RValue a[2] = { *g_get_ref(self, list_id), obj_ref(g->id) };
-        call_bi(self, other, add_id, 2, a);
+        call_bi(self, other, BI("ds_list_add"), 2, a);
         logf_("New gear '%s' added to selection (%s)", g->name, g->list_var);
     }
 }
