@@ -70,13 +70,17 @@ static void molt_remove_from_pool(void *powers, void *other, const char *pool_na
     }
 }
 
+// gainMod(mod, <constant the wild mods pass>, pool), exactly as mBravado calls it
+#define RVA_GAIN_MOD_ARG 0x1e792e8
+
 static void ev_molt_pick(void *self, void *other) {
     int pool = var_id(MOLT->list_var);
     if (g_powers && pool >= 0) {
         set_self_var(g_powers, VAR("wildModsOwned"), get_var(g_powers, VAR("wildModsOwned")) + 1);
-        RValue a[2] = { *g_get_ref(g_powers, pool), obj_ref(MOLT->id) }, res = { .kind = 5 };
-        void *argv[2] = { &a[0], &a[1] };
-        g_gain_mod(g_powers, self, &res, 2, argv);
+        RValue a[3] = { obj_ref(MOLT->id), *(RValue *)rt_global(RVA_GAIN_MOD_ARG), *g_get_ref(g_powers, pool) };
+        RValue res = { .kind = 5 };
+        void *argv[3] = { &a[0], &a[1], &a[2] };
+        g_gain_mod(g_powers, self, &res, 3, argv);
         for (int i = 0; i < 3; i++) molt_remove_from_pool(g_powers, self, WILD_POOLS[i]);
     }
     g_molt.owned = 1;

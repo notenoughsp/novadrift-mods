@@ -60,8 +60,13 @@ static RValue obj_ref(int idx) {
     return r;
 }
 
+// Object reference or plain object index (lists can hold either)
 static int is_obj_ref(const RValue *rv, int idx) {
-    return idx >= 0 && rv && (rv->kind & 0xffffff) == KIND_REF && (int32_t)rv->i64 == idx;
+    if (idx < 0 || !rv) return 0;
+    if ((rv->kind & 0xffffff) == KIND_REF) return (int32_t)rv->i64 == idx;
+    double v;
+    return ((rv->kind & 0xffffff) == KIND_REAL || (rv->kind & 0xffffff) == KIND_INT32 ||
+            (rv->kind & 0xffffff) == KIND_INT64) && rv_get(rv, &v) && v == idx;
 }
 
 static int is_instance(const RValue *rv) {
