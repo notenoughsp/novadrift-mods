@@ -19,17 +19,33 @@ static SetBuiltinVarFn g_set_builtin_var;
 static void *g_powers;  // oPowers instance of the current run (build and stats)
 static int g_obj_player = -1;
 
-typedef struct { const char *name; uint32_t rva; const char *bytes; } Helper;
+// GML "with" iterator: begin returns the instance count and sets *self per instance
+typedef int (*WithBeginFn)(void *it, void **self, void **other, RValue *target);
+typedef char (*WithNextFn)(void *it, void **self, void **other);
+typedef void (*WithEndFn)(void *it, void **self, void **other);
+typedef void (*FreeFn)(void *p);
+
+static WithBeginFn g_with_begin;
+static WithNextFn g_with_next;
+static WithEndFn g_with_end;
+static FreeFn g_yy_free;
+
+typedef struct { const char *name; uint32_t rva; const char *bytes; size_t len; } Helper;
+#define HELPER(name, rva, bytes) { name, rva, bytes, sizeof bytes - 1 }
 static const Helper HELPERS[] = {
-    { "assign", 0x2c010, "\x40\x53\x48\x83\xec\x30\x48\x8b\xd9" },
-    { "makeString", 0xf2cb60, "\x48\x89\x5c\x24\x10\x57\x48\x83\xec\x20" },
-    { "callBuiltin", 0xf2d190, "\x40\x55\x41\x54\x41\x55\x41\x56\x41\x57" },
-    { "setBuiltinVar", 0xf17460, "\x48\x89\x5c\x24\x08\x48\x89\x6c\x24\x10\x48\x89\x74\x24\x18" },
+    HELPER("assign", 0x2c010, "\x40\x53\x48\x83\xec\x30\x48\x8b\xd9"),
+    HELPER("makeString", 0xf2cb60, "\x48\x89\x5c\x24\x10\x57\x48\x83\xec\x20"),
+    HELPER("callBuiltin", 0xf2d190, "\x40\x55\x41\x54\x41\x55\x41\x56\x41\x57"),
+    HELPER("setBuiltinVar", 0xf17460, "\x48\x89\x5c\x24\x08\x48\x89\x6c\x24\x10\x48\x89\x74\x24\x18"),
+    HELPER("withBegin", 0xf2d960, "\x48\x89\x5c\x24\x08\x48\x89\x6c\x24\x10\x48\x89\x74\x24\x18\x57"),
+    HELPER("withNext", 0xf2e080, "\x48\x83\x79\x10\x00\x74\x17\x48\x83\x41\x18\xf8"),
+    HELPER("withEnd", 0xf2d630, "\x48\x89\x5c\x24\x08\x48\x89\x74\x24\x10\x57\x48\x83\xec\x20"),
+    HELPER("free", 0xf088e0, "\x33\xd2\xe9"),
 };
 
 static void *resolve_helper(const Helper *h) {
     uint8_t *p = (uint8_t *)GetModuleHandleW(NULL) + h->rva;
-    if (!in_range(g_text, p) || memcmp(p, h->bytes, strlen(h->bytes))) {
+    if (!in_range(g_text, p) || memcmp(p, h->bytes, h->len)) {
         logf_("New gear: helper %s does not match this game version", h->name);
         return NULL;
     }
@@ -81,12 +97,27 @@ static RValue call_bi(void *self, void *other, int id, int argc, RValue *args) {
     return res;
 }
 
-static double inst_get(void *self, void *other, RValue inst, RValue var) {
+static RValue inst_get_rv(void *self, void *other, RValue inst, RValue var) {
     RValue a[2] = { inst, var };
-    RValue r = call_bi(self, other, BI("variable_instance_get"), 2, a);
+    return call_bi(self, other, BI("variable_instance_get"), 2, a);
+}
+
+static double inst_get(void *self, void *other, RValue inst, RValue var) {
+    RValue r = inst_get_rv(self, other, inst, var);
     double v = 0;
     rv_get(&r, &v);
     return v;
+}
+
+// Runs fn(instance pointer) for each instance of target, like GML "with"
+static void with_instances(void *self, void *other, RValue target, void (*fn)(void *inst, void *ctx), void *ctx) {
+    if (!g_with_begin || !g_with_next || !g_with_end) return;
+    struct { uint8_t head[16]; void *list; uint8_t tail[40]; } it = { 0 };
+    void *s = self, *o = other;
+    if (g_with_begin(&it, &s, &o, &target) > 0)
+        do fn(s, ctx); while (g_with_next(&it, &s, &o));
+    g_with_end(&it, &s, &o);
+    if (it.list && g_yy_free) g_yy_free(it.list);
 }
 
 static void inst_set(void *self, void *other, RValue inst, RValue var, RValue value) {
@@ -455,6 +486,10 @@ static void install_newgear(void) {
     g_make_string = (MakeStringFn)resolve_helper(&HELPERS[1]);
     g_call_builtin = (CallBuiltinFn)resolve_helper(&HELPERS[2]);
     g_set_builtin_var = (SetBuiltinVarFn)resolve_helper(&HELPERS[3]);
+    g_with_begin = (WithBeginFn)resolve_helper(&HELPERS[4]);
+    g_with_next = (WithNextFn)resolve_helper(&HELPERS[5]);
+    g_with_end = (WithEndFn)resolve_helper(&HELPERS[6]);
+    g_yy_free = (FreeFn)resolve_helper(&HELPERS[7]);
     if (!g_assign || !g_make_string || !g_call_builtin) { logf_("New gear: disabled"); return; }
 
     // Base: body is always the standard form, weapon comes from [newweapon] base=<name>

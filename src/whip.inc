@@ -4,7 +4,8 @@
 // flames, trail and movement disabled. Values: whip_* in [newweapon].
 
 static GmlEventFn o_player_step, o_venom_create;
-static int g_obj_solid = -1, g_obj_venom = -1, g_obj_enemy_shot = -1;
+static int g_obj_solid = -1, g_obj_venom = -1, g_obj_enemy_shot = -1, g_obj_reflected = -1;
+static int g_reflected;  // reflected projectiles (log)
 static int g_whip_cooldown;
 
 // whip_* values, read after each INI load
@@ -86,22 +87,32 @@ static void hk_venom_create(void *self, void *other) {
     set_self_var(self, VAR("scale"), 1);
 }
 
-static void whip_strike(void *self, void *other, RValue player, double px, double py, double face) {
-    if (g_whip_count >= 4 || !load_whip_sprite(self, other)) return;
+// Nearest instance of obj around a point behind the ship; 1 if it is in range and in
+// the cone behind (GameMaker: y points down). *dir = direction to it in radians.
+static int find_behind(void *self, void *other, int obj, double px, double py, double face, double *dir) {
+    if (obj < 0) return 0;
     double range = g_wc.range;
-    RValue a[4];
-
-    // Nearest enemy around a point behind the ship (GameMaker: y points down)
+    RValue a[3];
     make_real(&a[0], px - cos(face) * range * 0.5);
     make_real(&a[1], py + sin(face) * range * 0.5);
-    a[2] = obj_ref(g_obj_solid);
-    RValue enemy = call_bi(self, other, BI("instance_nearest"), 3, a);
-    if (!is_instance(&enemy)) return;
-    double dx = inst_get(self, other, enemy, GSTR("x")) - px, dy = inst_get(self, other, enemy, GSTR("y")) - py;
-    if (dx * dx + dy * dy > range * range) return;
-    double dir = atan2(-dy, dx);
-    double diff = fabs(remainder(dir - face, 2 * M_PI)) * 180 / M_PI;
-    if (diff < 180 - g_wc.angle) return;  // not behind the ship
+    a[2] = obj_ref(obj);
+    RValue target = call_bi(self, other, BI("instance_nearest"), 3, a);
+    if (!is_instance(&target)) return 0;
+    double dx = inst_get(self, other, target, GSTR("x")) - px, dy = inst_get(self, other, target, GSTR("y")) - py;
+    if (dx * dx + dy * dy > range * range) return 0;
+    *dir = atan2(-dy, dx);
+    double diff = fabs(remainder(*dir - face, 2 * M_PI)) * 180 / M_PI;
+    return diff >= 180 - g_wc.angle;
+}
+
+static void whip_strike(void *self, void *other, RValue player, double px, double py, double face) {
+    if (g_whip_count >= 4 || !load_whip_sprite(self, other)) return;
+    // Enemies first, else incoming projectiles (to bat them back)
+    double dir;
+    if (!find_behind(self, other, g_obj_solid, px, py, face, &dir) &&
+        !(g_wc.block && find_behind(self, other, g_obj_enemy_shot, px, py, face, &dir)))
+        return;
+    RValue a[4];
 
     // Damage per frame of contact; the game reads it from oPowers.venomStrikeDamage on hit
     int dmg_id = VAR("venomStrikeDamage");
@@ -122,16 +133,68 @@ static void whip_strike(void *self, void *other, RValue player, double px, doubl
     g_whip_cooldown = g_wc.cooldown;
 }
 
-// Destroys enemy projectiles touching the tail (its precise mask, current frame)
+// Bat a projectile back like the game's reflect(): it turns into a reflected clone
+// (hits enemies, not the player) that remembers its original object, sprite and mask.
+typedef struct { double dir, revenge; RValue object, sprite, mask; } Reflect;
+
+static void reflect_shot(void *p, void *ctx) {
+    Reflect *r = ctx;
+    set_builtin_real(p, VAR("direction"), NO_INDEX, r->dir);
+    set_builtin_real(p, VAR("image_angle"), NO_INDEX, r->dir);
+    set_self_var(p, VAR("revenge"), r->revenge);  // damage multiplier, also marks it as reflected
+    int orig = VAR("object_index_original");
+    if (orig >= 0) g_assign(g_get_ref(p, orig), &r->object);
+    RValue a[2] = { obj_ref(g_obj_reflected) };
+    make_real(&a[1], 0);  // no events
+    call_bi(p, p, BI("instance_change"), 2, a);
+    set_builtin(p, VAR("sprite_index"), NO_INDEX, &r->sprite);
+    double mask = -1;
+    rv_get(&r->mask, &mask);
+    if (mask != -1) set_builtin(p, VAR("mask_index"), NO_INDEX, &r->mask);
+}
+
+static void whip_reflect(void *w, RValue shot, double tx, double ty) {
+    if (inst_get(w, w, shot, GSTR("revenge")) > 0) return;  // already reflected
+    double sx = inst_get(w, w, shot, GSTR("x")), sy = inst_get(w, w, shot, GSTR("y"));
+    Reflect r;
+    // Back at the shooter if it still exists, else straight back
+    RValue shooter = inst_get_rv(w, w, shot, GSTR("shooter"));
+    RValue alive = call_bi(w, w, BI("instance_exists"), 1, &shooter);
+    double ok = 0;
+    rv_get(&alive, &ok);
+    if (ok && is_instance(&shooter)) {
+        double ex = inst_get(w, w, shooter, GSTR("x")), ey = inst_get(w, w, shooter, GSTR("y"));
+        r.dir = atan2(-(ey - sy), ex - sx) * 180 / M_PI;
+    } else if ((sx - tx) * (sx - tx) + (sy - ty) * (sy - ty) > 1) {
+        r.dir = atan2(-(sy - ty), sx - tx) * 180 / M_PI;  // away from the tail base
+    } else {
+        r.dir = inst_get(w, w, shot, GSTR("direction")) + 180;
+    }
+    r.revenge = g_powers ? get_var(g_powers, VAR("reflectMult")) : 1;
+    if (r.revenge <= 0) r.revenge = 1;
+    r.object = inst_get_rv(w, w, shot, GSTR("object_index"));
+    r.sprite = inst_get_rv(w, w, shot, GSTR("sprite_index"));
+    r.mask = inst_get_rv(w, w, shot, GSTR("mask_index"));
+    with_instances(w, w, shot, reflect_shot, &r);
+    if (++g_reflected <= 5 || g_reflected % 50 == 0) {
+        double obj = -1;
+        rv_get(&r.object, &obj);
+        logf_("Whip: projectile %s batted back (%d so far)", object_name((int)obj), g_reflected);
+    }
+}
+
+// Enemy projectiles touching the tail (its precise mask, current frame) are batted back
 static void whip_block(void *w, double x, double y) {
     RValue a[3];
     make_real(&a[0], x);
     make_real(&a[1], y);
     a[2] = obj_ref(g_obj_enemy_shot);
-    for (int n = 0; n < 16; n++) {  // destroyed instances are skipped by the next check
+    for (int n = 0; n < 16; n++) {  // changed instances no longer match oEnemyProjectile
         RValue shot = call_bi(w, w, BI("instance_place"), 3, a);
         if (!is_instance(&shot)) break;
-        call_bi(w, w, BI("instance_destroy"), 1, &shot);
+        double before = g_reflected;
+        whip_reflect(w, shot, x, y);
+        if (g_reflected == before) break;  // not reflectable, avoid finding it again
     }
 }
 
@@ -194,6 +257,11 @@ static void install_whip(void) {
     g_obj_solid = find_object("oSolid");
     g_obj_venom = find_object("oVenomStrike");
     g_obj_enemy_shot = find_object("oEnemyProjectile");  // parent of all enemy shots
+    g_obj_reflected = find_object("oEnemyProjectileReflectedObjectClone");
+    if (g_obj_reflected < 0 || !g_with_begin || !g_with_next || !g_with_end) {
+        g_obj_enemy_shot = -1;
+        logf_("Whip: projectile reflection unavailable");
+    }
     if (g_obj_player < 0 || g_obj_solid < 0 || g_obj_venom < 0) { logf_("Whip: objects missing"); return; }
     o_venom_create = hook_event("oVenomStrike", "Create_0", hk_venom_create);
     if (!o_venom_create) return;
