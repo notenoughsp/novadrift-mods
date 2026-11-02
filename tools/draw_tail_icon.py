@@ -1,7 +1,7 @@
 """Draws the stinger tail hex icon in the style of Nova Drift weapon icons (268x308).
 
 Usage:  python -I draw_tail_icon.py <output_dir>
-Output: stachelschwanz_icon.png
+Output: stinger_icon.png
 """
 import math
 import os
@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from draw_icon import H, W, blur, hexagon, mask_of, nebula  # noqa: E402
-from draw_skorpion import circle, write_png  # noqa: E402
+from draw_scorpion import circle, write_png  # noqa: E402
 
 
 def tail_points():
@@ -67,7 +67,7 @@ def main(out):
     border = np.clip(hex_outer - hex_inner, 0, 1)
     rgb = rgb * (1 - border[..., None])
     img = np.dstack([np.clip(rgb, 0, 255), hex_outer * 255]).astype(np.uint8)
-    write_png(os.path.join(out, "stachelschwanz_icon.png"), W, H, [bytearray(img[y].tobytes()) for y in range(H)])
+    write_png(os.path.join(out, "stinger_icon.png"), W, H, [bytearray(img[y].tobytes()) for y in range(H)])
 
 
 if __name__ == "__main__":

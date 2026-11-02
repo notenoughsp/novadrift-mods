@@ -9,8 +9,10 @@ typedef void (*AssignFn)(RValue *dst, const RValue *src);
 typedef void (*MakeStringFn)(RValue *out, const char *utf8);
 typedef void *(*CallBuiltinFn)(void *self, void *other, RValue *ret, int argc, int64_t fn, RValue **argv);
 typedef void (*GmlEventFn)(void *self, void *other);
-// Sets built-in instance variables (sprite_index, image_blend, ...)
+// Sets / reads built-in instance variables (sprite_index, image_blend, ...)
 typedef void (*SetBuiltinVarFn)(void *inst, int id, int array_index, RValue *value);
+typedef void (*GetBuiltinVarFn)(void *inst, int id, int array_index, RValue *out);
+static GetBuiltinVarFn g_get_builtin_var;
 
 static AssignFn g_assign;
 static MakeStringFn g_make_string;
@@ -41,6 +43,7 @@ static const Helper HELPERS[] = {
     HELPER("withNext", 0xf2e080, "\x48\x83\x79\x10\x00\x74\x17\x48\x83\x41\x18\xf8"),
     HELPER("withEnd", 0xf2d630, "\x48\x89\x5c\x24\x08\x48\x89\x74\x24\x10\x57\x48\x83\xec\x20"),
     HELPER("free", 0xf088e0, "\x33\xd2\xe9"),
+    HELPER("getBuiltinVar", 0xf16380, "\x41\xc7\x41\x0c\xff\xff\xff\x00\x45\x8b\xd0\x81\xfa\x0f\x27"),
 };
 
 static void *resolve_helper(const Helper *h) {
@@ -127,6 +130,12 @@ static void inst_set(void *self, void *other, RValue inst, RValue var, RValue va
 
 static void set_builtin(void *inst, int id, int index, RValue *value) {
     if (id >= 0 && g_set_builtin_var) g_set_builtin_var(inst, id, index, value);
+}
+
+static RValue get_builtin(void *inst, int id) {
+    RValue v = { .kind = 5 };  // undefined
+    if (id >= 0 && g_get_builtin_var) g_get_builtin_var(inst, id, NO_INDEX, &v);
+    return v;
 }
 
 static void set_builtin_real(void *inst, int id, int index, double value) {
@@ -490,6 +499,7 @@ static void install_newgear(void) {
     g_with_next = (WithNextFn)resolve_helper(&HELPERS[5]);
     g_with_end = (WithEndFn)resolve_helper(&HELPERS[6]);
     g_yy_free = (FreeFn)resolve_helper(&HELPERS[7]);
+    g_get_builtin_var = (GetBuiltinVarFn)resolve_helper(&HELPERS[8]);
     if (!g_assign || !g_make_string || !g_call_builtin) { logf_("New gear: disabled"); return; }
 
     // Base: body is always the standard form, weapon comes from [newweapon] base=<name>

@@ -1,7 +1,7 @@
-"""Draws the Skorpion hex icon in the style of Nova Drift gear icons (268x308).
+"""Draws the Scorpion hex icon in the style of Nova Drift gear icons (268x308).
 
 Usage:  python -I draw_icon.py <output_dir>
-Output: skorpion_icon.png
+Output: scorpion_icon.png
 """
 import math
 import os
@@ -10,7 +10,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from draw_skorpion import CLAW, ENGINE, HULL, STINGER, TAIL_SEGMENTS, Canvas, circle, mirror, write_png  # noqa: E402
+from draw_scorpion import CLAW, ENGINE, HULL, STINGER, TAIL_SEGMENTS, Canvas, circle, mirror, write_png  # noqa: E402
 
 W, H = 268, 308
 
@@ -57,7 +57,7 @@ def nebula(seed=7):
 
 
 def ship(c):
-    # Skorpion from draw_skorpion, rotated 90 degrees (nose up) and scaled
+    # Scorpion from draw_scorpion, rotated 90 degrees (nose up) and scaled
     k = 0.8
 
     def rot(pts):
@@ -117,7 +117,7 @@ def main(out):
     alpha = hex_outer * 255
 
     img = np.dstack([np.clip(rgb, 0, 255), alpha]).astype(np.uint8)
-    write_png(os.path.join(out, "skorpion_icon.png"), W, H, [bytearray(img[y].tobytes()) for y in range(H)])
+    write_png(os.path.join(out, "scorpion_icon.png"), W, H, [bytearray(img[y].tobytes()) for y in range(H)])
 
 
 if __name__ == "__main__":

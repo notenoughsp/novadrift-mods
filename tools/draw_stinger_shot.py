@@ -11,7 +11,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from draw_icon import blur  # noqa: E402
-from draw_skorpion import Canvas, write_png  # noqa: E402
+from draw_scorpion import Canvas, write_png  # noqa: E402
 
 W, H, OX, OY = 201, 80, 160, 40
 
@@ -45,7 +45,7 @@ def main(out):
     gray = np.clip(0.55 + 0.45 * np.maximum(core, shape * 0.6), 0, 1)
     rgb = (np.stack([gray] * 3, axis=-1) * 255)
     img = np.dstack([rgb, alpha * 255]).astype(np.uint8)
-    write_png(os.path.join(out, "stachelschwanz_shot.png"), W, H, [bytearray(img[y].tobytes()) for y in range(H)])
+    write_png(os.path.join(out, "stinger_shot.png"), W, H, [bytearray(img[y].tobytes()) for y in range(H)])
 
 
 if __name__ == "__main__":

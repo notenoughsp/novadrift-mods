@@ -135,22 +135,25 @@ static void whip_strike(void *self, void *other, RValue player, double px, doubl
 
 // Bat a projectile back like the game's reflect(): it turns into a reflected clone
 // (hits enemies, not the player) that remembers its original object, sprite and mask.
-typedef struct { double dir, revenge; RValue object, sprite, mask; } Reflect;
+typedef struct { double dir, revenge, object; } Reflect;
 
 static void reflect_shot(void *p, void *ctx) {
     Reflect *r = ctx;
+    RValue object = get_builtin(p, VAR("object_index"));
+    RValue sprite = get_builtin(p, VAR("sprite_index")), mask = get_builtin(p, VAR("mask_index"));
+    rv_get(&object, &r->object);
     set_builtin_real(p, VAR("direction"), NO_INDEX, r->dir);
     set_builtin_real(p, VAR("image_angle"), NO_INDEX, r->dir);
     set_self_var(p, VAR("revenge"), r->revenge);  // damage multiplier, also marks it as reflected
     int orig = VAR("object_index_original");
-    if (orig >= 0) g_assign(g_get_ref(p, orig), &r->object);
+    if (orig >= 0) g_assign(g_get_ref(p, orig), &object);
     RValue a[2] = { obj_ref(g_obj_reflected) };
     make_real(&a[1], 0);  // no events
     call_bi(p, p, BI("instance_change"), 2, a);
-    set_builtin(p, VAR("sprite_index"), NO_INDEX, &r->sprite);
-    double mask = -1;
-    rv_get(&r->mask, &mask);
-    if (mask != -1) set_builtin(p, VAR("mask_index"), NO_INDEX, &r->mask);
+    set_builtin(p, VAR("sprite_index"), NO_INDEX, &sprite);
+    double m = -1;
+    rv_get(&mask, &m);
+    if (m != -1) set_builtin(p, VAR("mask_index"), NO_INDEX, &mask);
 }
 
 static void whip_reflect(void *w, RValue shot, double tx, double ty) {
@@ -172,15 +175,10 @@ static void whip_reflect(void *w, RValue shot, double tx, double ty) {
     }
     r.revenge = g_powers ? get_var(g_powers, VAR("reflectMult")) : 1;
     if (r.revenge <= 0) r.revenge = 1;
-    r.object = inst_get_rv(w, w, shot, GSTR("object_index"));
-    r.sprite = inst_get_rv(w, w, shot, GSTR("sprite_index"));
-    r.mask = inst_get_rv(w, w, shot, GSTR("mask_index"));
+    r.object = -1;
     with_instances(w, w, shot, reflect_shot, &r);
-    if (++g_reflected <= 5 || g_reflected % 50 == 0) {
-        double obj = -1;
-        rv_get(&r.object, &obj);
-        logf_("Whip: projectile %s batted back (%d so far)", object_name((int)obj), g_reflected);
-    }
+    if (++g_reflected <= 5 || g_reflected % 50 == 0)
+        logf_("Whip: projectile %s batted back (%d so far)", object_name((int)r.object), g_reflected);
 }
 
 // Enemy projectiles touching the tail (its precise mask, current frame) are batted back
@@ -258,7 +256,7 @@ static void install_whip(void) {
     g_obj_venom = find_object("oVenomStrike");
     g_obj_enemy_shot = find_object("oEnemyProjectile");  // parent of all enemy shots
     g_obj_reflected = find_object("oEnemyProjectileReflectedObjectClone");
-    if (g_obj_reflected < 0 || !g_with_begin || !g_with_next || !g_with_end) {
+    if (g_obj_reflected < 0 || !g_with_begin || !g_with_next || !g_with_end || !g_get_builtin_var) {
         g_obj_enemy_shot = -1;
         logf_("Whip: projectile reflection unavailable");
     }

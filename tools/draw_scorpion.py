@@ -1,8 +1,8 @@
-"""Draws the Skorpion custom skin for Nova Drift (white on transparent).
+"""Draws the Scorpion custom skin for Nova Drift (white on transparent).
 
 The nose points right (+x), like the official sample skins.
-Output: skorpion.png, skorpion_force.png, skorpion_drone.png, preview.png
-Usage:  python -I draw_skorpion.py <output_dir>
+Output: scorpion.png, scorpion_force.png, scorpion_drone.png, preview.png
+Usage:  python -I draw_scorpion.py <output_dir>
 """
 import math
 import os
@@ -161,15 +161,15 @@ def main(out):
     os.makedirs(out, exist_ok=True)
     body = Canvas(300, 240)
     draw_ship(body)
-    body.png(os.path.join(out, "skorpion.png"))
+    body.png(os.path.join(out, "scorpion.png"))
 
     force = Canvas(340, 220)
     force_armor(force)
-    force.png(os.path.join(out, "skorpion_force.png"))
+    force.png(os.path.join(out, "scorpion_force.png"))
 
     drone = Canvas(150, 120, scale=0.5)
     draw_ship(drone, detail=False)
-    drone.png(os.path.join(out, "skorpion_drone.png"))
+    drone.png(os.path.join(out, "scorpion_drone.png"))
 
     # Preview at double size (for viewing only, not used in game)
     big_body = Canvas(600, 480, scale=2.0)

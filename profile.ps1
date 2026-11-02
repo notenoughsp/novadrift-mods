@@ -1,6 +1,6 @@
 # Enables or disables a mod profile.
-#   .\profile.ps1 skorpion            enable
-#   .\profile.ps1 skorpion -Disable   disable
+#   .\profile.ps1 scorpion            enable
+#   .\profile.ps1 scorpion -Disable   disable
 param([Parameter(Mandatory)][string]$Name, [switch]$Disable, [string]$GameDir)
 
 $ErrorActionPreference = 'Stop'

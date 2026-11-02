@@ -4,7 +4,7 @@ A segmented scorpion tail lashing out from the stern (origin left) to the right.
 Over the frames: curled wind-up -> fully stretched strike -> curl to the other side,
 like a whip. Drawn in white, the game colors it via image_blend.
 One frame (16 total): 220x130, origin (12, 65), 0 degrees = right.
-Output: stachelschwanz_whip.png (FRAMES frames side by side, for sprite_add with imgnum)
+Output: stinger_whip.png (FRAMES frames side by side, for sprite_add with imgnum)
 Usage:  python -I draw_whip_sprite.py <output_dir>
 """
 import math
@@ -15,7 +15,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from draw_icon import blur  # noqa: E402
-from draw_skorpion import Canvas, circle, write_png  # noqa: E402
+from draw_scorpion import Canvas, circle, write_png  # noqa: E402
 
 W, H, OX, OY = 220, 130, 12, 65
 FRAMES = 16
@@ -87,7 +87,7 @@ def frame(f):
 def main(out):
     os.makedirs(out, exist_ok=True)
     strip = np.concatenate([frame(i / (FRAMES - 1)) for i in range(FRAMES)], axis=1).astype(np.uint8)
-    write_png(os.path.join(out, "stachelschwanz_whip.png"), W * FRAMES, H,
+    write_png(os.path.join(out, "stinger_whip.png"), W * FRAMES, H,
               [bytearray(strip[y].tobytes()) for y in range(H)])
 
 
