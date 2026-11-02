@@ -26,10 +26,13 @@ typedef struct {
     char values[96];        // value section name
 } NewGear;
 
-static NewGear g_gear[2] = {
+// 0 = body, 1 = weapon, 2 = the Molting wild mod (molting.inc; only texts, icon and offer here)
+static NewGear g_gear[3] = {
     { .section = "newbody", .kind = "body", .list_var = "gearBodies", .id = -1, .base = -1, .base_type = 1 },
     { .section = "newweapon", .kind = "weapon", .list_var = "gearWeapons", .id = -1, .base = -1, .base_type = -1 },
+    { .section = "molting", .kind = "mod", .list_var = "wildModsRare", .id = -1, .base = -1, .base_type = -1 },
 };
+static void molting_run_start(void *powers, void *other);  // molting.inc
 
 static const char *g_shot_file, *g_shot_color;
 
@@ -37,7 +40,7 @@ static const char *gear_text(NewGear *g, const char *key) { return gear_text_get
 static int gear_enabled(NewGear *g) { return g->id >= 0 && g->base >= 0 && g->name; }
 
 static void newgear_config(void) {
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < 3; i++) {
         NewGear *g = &g_gear[i];
         g->name = gear_text(g, "name");
         g->icon_file = gear_text(g, "icon");
@@ -94,12 +97,12 @@ UPGRADE_HOOKS(X)
 
 // Calls orig; if argv[0] is new gear, its base is passed instead. Returns the gear or NULL.
 static NewGear *call_upgrade(GmlFn orig, void *self, void *other, void *ret, int argc, void **argv, void **res) {
-    for (int i = 0; i < 2 && argc >= 1 && argc <= 8; i++) {
+    for (int i = 0; i < 3 && argc >= 1 && argc <= 8; i++) {
         NewGear *g = &g_gear[i];
         if (!gear_enabled(g)) continue;
         // UI asking for the base while the new gear is active (pause menu, gear list) gets
-        // the new gear's answer. The game never offers the base gear itself.
-        if (g_powers && is_obj_ref(argv[0], g->base) && gear_active(g, g_powers)) {
+        // the new gear's answer. The game never offers the base gear itself (not for mods).
+        if (i < 2 && g_powers && is_obj_ref(argv[0], g->base) && gear_active(g, g_powers)) {
             *res = orig(self, other, ret, argc, argv);
             return g;
         }
@@ -212,7 +215,8 @@ static void hk_powers_create(void *self, void *other) {
     o_powers_create(self, other);
     g_powers = self;
     spawn_probe(self, other);
-    for (int i = 0; i < 2; i++) {
+    molting_run_start(self, other);
+    for (int i = 0; i < 3; i++) {
         NewGear *g = &g_gear[i];
         if (!gear_enabled(g)) continue;
         int list_id = var_id(g->list_var);

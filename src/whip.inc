@@ -296,9 +296,13 @@ static void whip_update(void *self, void *other, double px, double py, double fa
     }
 }
 
+static int g_whip_ready;
+
+// oPlayer step: Molting, then the tail
 static void hk_player_step(void *self, void *other) {
     o_player_step(self, other);
-    int active = g_wc.on && g_powers && gear_active(&g_gear[1], g_powers);
+    molting_step(self, other);
+    int active = g_whip_ready && g_powers && gear_active(&g_gear[1], g_powers);
     if (!active && !g_whip_count) return;
     RValue a[2] = { obj_ref(g_obj_player) };
     make_real(&a[1], 0);
@@ -332,8 +336,12 @@ static void install_whip(void) {
     register_object(&g_tail_def);
     g_show_damage = (GmlFn)find_gml_function("gml_Script_showDamage");
     o_record_burn = hook(find_gml_function("gml_Script_recordDamageBurn"), hk_record_burn, "recordDamageBurn");
-    o_player_step = hook_event("oPlayer", "Step_0", hk_player_step);
-    if (o_player_step)
-        logf_("Whip active (damage %g per frame, lash %d frames, every %d frames)", g_wc.damage, g_wc.frames,
-              g_wc.cooldown);
+    g_whip_ready = 1;
+    logf_("Whip active (damage %g per frame, lash %d frames, every %d frames)", g_wc.damage, g_wc.frames,
+          g_wc.cooldown);
+}
+
+static void install_player_step(void) {
+    if (g_whip_ready || (g_mc.on && MOLT->def.name))
+        o_player_step = hook_event("oPlayer", "Step_0", hk_player_step);
 }

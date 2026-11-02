@@ -143,8 +143,8 @@ static void create_object(ObjDef *def, int template_code) {
     g_obj_names[g_obj_count++] = _strdup(def->name);
     def->index = index;
     if (def->index_out) *def->index_out = index;
-    logf_("Objects: created %s (index %d, parent %s, %d events)", def->name, index, object_name(parent),
-          def->event_count);
+    logf_("Objects: created %s (index %d, parent %s, %d events)", def->name, index,
+          parent >= 0 ? object_name(parent) : "none", def->event_count);
 }
 
 // Runs once while data.win is loaded, after all OBJT objects exist

@@ -342,6 +342,7 @@ EMBED(emb_scorpion_icon_png, "profiles/scorpion/skin/scorpion_icon.png")
 EMBED(emb_stinger_icon_png, "profiles/scorpion/skin/stinger_icon.png")
 EMBED(emb_stinger_shot_png, "profiles/scorpion/skin/stinger_shot.png")
 EMBED(emb_stinger_whip_png, "profiles/scorpion/skin/stinger_whip.png")
+EMBED(emb_molting_icon_png, "profiles/scorpion/skin/molting_icon.png")
 
 typedef struct { const wchar_t *path; const char *data, *end; } EmbeddedFile;
 #define FILE_ENTRY(name, sym) { L"custom_skins\\" name, sym, sym##_end }
@@ -353,6 +354,7 @@ static const EmbeddedFile SCORPION_FILES[] = {
     FILE_ENTRY(L"stinger_icon.png", emb_stinger_icon_png),
     FILE_ENTRY(L"stinger_shot.png", emb_stinger_shot_png),
     FILE_ENTRY(L"stinger_whip.png", emb_stinger_whip_png),
+    FILE_ENTRY(L"molting_icon.png", emb_molting_icon_png),
 };
 static int g_builtin_profile;  // the built-in scorpion profile is active
 
@@ -443,7 +445,7 @@ static int parse_ini_text(const char *text, int allow_profile) {
         char *key = line, *val = eq + 1;
         trim(key);
         trim(val);
-        if (!_stricmp(section, "newbody") || !_stricmp(section, "newweapon")) {
+        if (!_stricmp(section, "newbody") || !_stricmp(section, "newweapon") || !_stricmp(section, "molting")) {
             gear_text_set(section, key, val);
             continue;
         }
@@ -488,6 +490,7 @@ static int parse_ini(const wchar_t *path, int allow_profile) {
 // Caches the [newbody]/[newweapon] values (newgear.inc, whip.inc)
 static void newgear_config(void);
 static void whip_config(void);
+static void molting_config(void);
 
 static void load_ini(void) {
     wchar_t path[MAX_PATH];
@@ -500,6 +503,7 @@ static void load_ini(void) {
     else logf_("No novadrift_mods.ini found");
     newgear_config();
     whip_config();
+    molting_config();
 }
 
 static void apply_section(void *self, const char *section, int verbose) {
@@ -674,6 +678,7 @@ static void *hk_end_score(void *self, void *other, void *ret, int argc, void **a
 #include "gml.inc"
 #include "objects.inc"
 #include "newgear.inc"
+#include "molting.inc"
 #include "whip.inc"
 
 static void install(void) {
@@ -735,7 +740,9 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     install_profile_files();
     install_objects();
     install_newgear();
+    install_molting();
     install_whip();
+    install_player_step();
     logf_("Leaderboard block: %s", g_block_always ? "always on" : "only with modded values");
     return TRUE;
 }
