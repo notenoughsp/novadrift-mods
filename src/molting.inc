@@ -11,19 +11,22 @@
 
 static struct {
     int on, force_offer, duration, absorb_max, cooldown, softshell_time;
-    double threshold, absorb_bonus, softshell;
+    double threshold, absorb_bonus, softshell, husk_scale;
 } g_mc;
 
+// The husk is one part per ship part: the ship plus each body segment (oPlayerSegment)
+#define HUSK_PARTS 128
 static struct {
     int owned, cooldown, softshell;  // frames left
-    void *husk;
-    RValue husk_id;
+    struct { void *inst; RValue id; } parts[HUSK_PARTS];
+    int part_count;
+    void *new_part;                  // reported by the husk create event
     int husk_frames, absorbed;
 } g_molt;
 
 static GmlEventFn g_molt_base_create;
 static GmlFn g_gain_mod, o_hull_direct, o_hull_dot;
-static int g_obj_husk = -1, g_molt_shot = -1;
+static int g_obj_husk = -1, g_molt_shot = -1, g_obj_segment = -1;
 
 static double molt_param(const char *key, double def) {
     const char *v = gear_text(MOLT, key);
@@ -40,6 +43,7 @@ static void molting_config(void) {
     g_mc.cooldown = (int)molt_param("molting_cooldown", 2700);
     g_mc.softshell = molt_param("molting_softshell", 1.25);
     g_mc.softshell_time = (int)molt_param("molting_softshell_time", 180);
+    g_mc.husk_scale = molt_param("molting_husk_scale", 1.2);
     if (g_mc.duration < 1) g_mc.duration = 1;
 }
 
@@ -78,9 +82,10 @@ static void molting_run_start(void *powers, void *other) {
 
 // ------------------------------------------------------------------ Husk ----
 
+// with (oEnemyProjectile): absorbed if it touches this husk part (ctx = the part's id)
 static void husk_absorb(void *p, void *ctx) {
     if (g_molt.absorbed >= g_mc.absorb_max) return;
-    RValue a[3] = { get_builtin(p, VAR("x")), get_builtin(p, VAR("y")), g_molt.husk_id };
+    RValue a[3] = { get_builtin(p, VAR("x")), get_builtin(p, VAR("y")), *(RValue *)ctx };
     RValue hit = call_bi(p, p, BI("place_meeting"), 3, a);
     double touching = 0;
     if (!rv_get(&hit, &touching) || !touching) return;
@@ -91,16 +96,25 @@ static void husk_absorb(void *p, void *ctx) {
 static void husk_end(void *self, void *other, const char *why) {
     logf_("Molting: husk %s, %d projectiles absorbed (burst x%.2f, not built yet)", why, g_molt.absorbed,
           1 + g_molt.absorbed * g_mc.absorb_bonus);
-    g_molt.husk = NULL;
-    call_bi(self, other, BI("instance_destroy"), 0, NULL);
+    for (int i = 0; i < g_molt.part_count; i++) {
+        RValue alive = call_bi(self, other, BI("instance_exists"), 1, &g_molt.parts[i].id);
+        double ok = 0;
+        if (rv_get(&alive, &ok) && ok) call_bi(self, other, BI("instance_destroy"), 1, &g_molt.parts[i].id);
+    }
+    g_molt.part_count = 0;
 }
 
-static void ev_husk_create(void *self, void *other) { g_molt.husk = self; }
+static void ev_husk_create(void *self, void *other) { g_molt.new_part = self; }
 
+// Every part absorbs; the first part also runs the timer and fades all parts
 static void ev_husk_step(void *self, void *other) {
-    if (self != g_molt.husk) return;
-    if (g_molt_shot >= 0) with_instances(self, other, obj_ref(g_molt_shot), husk_absorb, NULL);
-    set_builtin_real(self, VAR("image_alpha"), NO_INDEX, 0.2 + 0.5 * g_molt.husk_frames / g_mc.duration);
+    int i = 0;
+    while (i < g_molt.part_count && g_molt.parts[i].inst != self) i++;
+    if (i == g_molt.part_count) return;
+    if (g_molt_shot >= 0) with_instances(self, other, obj_ref(g_molt_shot), husk_absorb, &g_molt.parts[i].id);
+    if (i) return;
+    double alpha = 0.35 + 0.55 * g_molt.husk_frames / g_mc.duration;
+    for (int k = 0; k < g_molt.part_count; k++) set_builtin_real(g_molt.parts[k].inst, VAR("image_alpha"), NO_INDEX, alpha);
     if (g_molt.absorbed >= g_mc.absorb_max) husk_end(self, other, "cracked");
     else if (--g_molt.husk_frames <= 0) husk_end(self, other, "expired");
 }
@@ -111,27 +125,42 @@ static const ObjEvent HUSK_EVENTS[] = {
 };
 static ObjDef g_husk_def = { "oMoltingHusk", NULL, NULL, 1, HUSK_EVENTS, 2, -1, &g_obj_husk };
 
-// Shed the shell at the player's position with the player's look
-static void molt(void *player, void *other) {
-    RValue a[4] = { get_builtin(player, VAR("x")), get_builtin(player, VAR("y")) };
-    double depth = 0;
-    RValue d = get_builtin(player, VAR("depth"));
+// One husk part with the look of a ship part (the ship or a body segment)
+static void husk_part(void *part, void *ctx) {
+    if (g_molt.part_count >= HUSK_PARTS) return;
+    RValue a[4] = { get_builtin(part, VAR("x")), get_builtin(part, VAR("y")) };
+    double depth = 0, xs = 1, ys = 1;
+    RValue d = get_builtin(part, VAR("depth"));
     rv_get(&d, &depth);
-    make_real(&a[2], depth + 1);  // just behind the ship
+    make_real(&a[2], depth + 1);  // just behind the ship part
     a[3] = obj_ref(g_obj_husk);
-    g_molt.husk = NULL;
-    g_molt.husk_id = call_bi(player, other, BI("instance_create_depth"), 4, a);
-    void *h = g_molt.husk;
+    g_molt.new_part = NULL;
+    RValue id = call_bi(part, part, BI("instance_create_depth"), 4, a);
+    void *h = g_molt.new_part;
     if (!h) return;
-    const char *copy[] = { "sprite_index", "image_index", "image_angle", "image_xscale", "image_yscale" };
-    for (int i = 0; i < 5; i++) {
-        int id = var_id(copy[i]);
-        RValue v = get_builtin(player, id);
-        set_builtin(h, id, NO_INDEX, &v);
+    g_molt.parts[g_molt.part_count].inst = h;
+    g_molt.parts[g_molt.part_count++].id = id;
+    const char *copy[] = { "sprite_index", "image_index", "image_angle" };
+    for (int i = 0; i < 3; i++) {
+        int v = var_id(copy[i]);
+        RValue val = get_builtin(part, v);
+        set_builtin(h, v, NO_INDEX, &val);
     }
+    RValue x = get_builtin(part, VAR("image_xscale")), y = get_builtin(part, VAR("image_yscale"));
+    rv_get(&x, &xs);
+    rv_get(&y, &ys);
+    set_builtin_real(h, VAR("image_xscale"), NO_INDEX, xs * g_mc.husk_scale);
+    set_builtin_real(h, VAR("image_yscale"), NO_INDEX, ys * g_mc.husk_scale);
     set_builtin_real(h, VAR("image_speed"), NO_INDEX, 0);
     set_builtin_real(h, VAR("image_blend"), NO_INDEX, 0x909090);
-    set_builtin_real(h, VAR("image_alpha"), NO_INDEX, 0.7);
+    set_builtin_real(h, VAR("image_alpha"), NO_INDEX, 0.9);
+}
+
+// Shed the shell: a husk part for the ship and every body segment
+static void molt(void *player, void *other) {
+    g_molt.part_count = 0;
+    husk_part(player, NULL);
+    if (g_obj_segment >= 0) with_instances(player, other, obj_ref(g_obj_segment), husk_part, NULL);
     g_molt.husk_frames = g_mc.duration;
     g_molt.absorbed = 0;
     g_molt.cooldown = g_mc.cooldown;
@@ -143,11 +172,11 @@ static void molting_step(void *self, void *other) {
     if (!g_molt.owned || g_obj_husk < 0 || !g_powers) return;
     if (g_molt.cooldown > 0) g_molt.cooldown--;
     if (g_molt.softshell > 0) g_molt.softshell--;
-    if (g_molt.husk || g_molt.cooldown > 0) return;
+    if (g_molt.part_count || g_molt.cooldown > 0) return;
     double hull = get_var(g_powers, VAR("hull")), max = get_var(g_powers, VAR("hullMax"));
     if (max <= 0 || hull <= 0 || hull >= max * g_mc.threshold) return;
     molt(self, other);
-    logf_("Molting: shed shell at %.0f / %.0f hull", hull, max);
+    logf_("Molting: shed shell at %.0f / %.0f hull (%d parts)", hull, max, g_molt.part_count);
 }
 
 // ------------------------------------------------------------ Soft shell ----
@@ -185,6 +214,7 @@ static void install_molting(void) {
     g_molt_base_create = (GmlEventFn)find_gml_function(create);
     g_gain_mod = (GmlFn)find_gml_function("gml_Script_gainMod");
     g_molt_shot = find_object("oEnemyProjectile");
+    g_obj_segment = find_object("oPlayerSegment");
     if (g->base < 0 || !g_molt_base_create || !g_gain_mod) {
         logf_("Molting: base mod %s or gainMod not found, disabled", g->base_obj);
         return;
