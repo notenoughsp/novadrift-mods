@@ -102,14 +102,6 @@ static void build_func_table(void) {
     qsort(g_funcs, g_func_count, sizeof *g_funcs, func_cmp);
 }
 
-// Name of the GML function containing a code address (diagnostics)
-static const char *function_name_at(const void *addr) {
-    const FuncEntry *best = NULL;
-    for (size_t i = 0; i < g_func_count; i++)
-        if (g_funcs[i].func <= (const uint8_t *)addr && (!best || g_funcs[i].func > best->func)) best = &g_funcs[i];
-    return best ? best->name : "?";
-}
-
 // Finds "gml_Script_xyz" / "gml_Object_..." by name
 static uint8_t *find_gml_function(const char *name) {
     size_t lo = 0, hi = g_func_count;

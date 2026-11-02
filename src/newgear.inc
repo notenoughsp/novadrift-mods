@@ -158,17 +158,6 @@ PLAIN_HOOK(SuperModList) PLAIN_HOOK(SuperModSprites) PLAIN_HOOK(TagList) PLAIN_H
 static void *hk_up_Sprite(void *self, void *other, void *ret, int argc, void **argv) {
     void *r;
     NewGear *g = call_upgrade(o_up_Sprite, self, other, ret, argc, argv, &r);
-    // Diagnostics: which GML function asks for the Molting icon (once per caller)
-    static void *callers[16];
-    void *caller = __builtin_return_address(0);
-    int known = 0;
-    for (int i = 0; i < 16 && callers[i]; i++) known |= callers[i] == caller;
-    if (g == &g_gear[2] && !known) {
-        for (int i = 0; i < 16; i++)
-            if (!callers[i]) { callers[i] = caller; break; }
-        logf_("Sprite request for %s from %s (kind %u)", g->name, function_name_at(caller),
-              ((RValue *)argv[0])->kind & 0xffffff);
-    }
     if (!g || !g->icon_file || g->icon_state < 0) return r;
     if (!g->icon_state) g->icon_state = add_sprite(self, other, g->icon_file, 1, 0, 0, &g->icon) ? 1 : -1;
     if (g->icon_state > 0) g_assign(ret, &g->icon);
