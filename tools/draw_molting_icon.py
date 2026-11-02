@@ -97,7 +97,99 @@ def v_flake():
     return [(plates, (210, 200, 225), 0.8, 0), (ship, (255, 248, 235), 1.0, 8)]
 
 
-VARIANTS = {"husk": v_husk, "egg": v_egg, "skin": v_skin, "absorb": v_absorb, "flake": v_flake}
+# --- Turtle shell variants: carapace seen from above (oval, rim, 3 central scutes, side plates)
+def ellipse(cx, cy, rx, ry, angle=0.0, n=56):
+    ca, sa = math.cos(angle), math.sin(angle)
+    return [(cx + (math.cos(t) * rx) * ca - (math.sin(t) * ry) * sa, cy + (math.cos(t) * rx) * sa + (math.sin(t) * ry) * ca)
+            for t in np.linspace(0, 2 * math.pi, n, endpoint=False)]
+
+
+def carapace(cx, cy, s=1.0, angle=0.0):
+    """Masks (body, seams) of a turtle shell."""
+    ca, sa = math.cos(angle), math.sin(angle)
+
+    def p(x, y):
+        return cx + (x * ca - y * sa) * s, cy + (x * sa + y * ca) * s
+
+    def seam(c, a, b, w=2.6):
+        line(c, *p(*a), *p(*b), w * s)
+
+    hexes = [(0, 38), (0, 0), (0, -38)]
+    corners = lambda hx, hy: [(hx + math.cos(k * math.pi / 3) * 21, hy + math.sin(k * math.pi / 3) * 21) for k in range(6)]
+
+    def seams(c):
+        rim = ellipse(0, 0, 50, 64)
+        for a, b in zip(rim, rim[1:] + rim[:1]):
+            seam(c, a, b)
+        for hx, hy in hexes:
+            pts = corners(hx, hy)
+            for a, b in zip(pts, pts[1:] + pts[:1]):
+                seam(c, a, b)
+        for hx, hy in hexes:  # side plates: from the side corners out to the rim
+            for k in (0, 3):
+                x, y = corners(hx, hy)[k]
+                seam(c, (x, y), (x + (50 if k == 0 else -50) * 0.62, y + 6))
+        for x, y in [(0, 59), (0, -59)]:
+            seam(c, (x, y * 0.66), (x, y))
+        for ang in np.linspace(0, 2 * math.pi, 14, endpoint=False):  # rim plates
+            seam(c, (math.cos(ang) * 50, math.sin(ang) * 64), (math.cos(ang) * 62, math.sin(ang) * 78), 2.0)
+
+    body = mask_of(lambda c: c.fill([p(x, y) for x, y in ellipse(0, 0, 62, 78)], 1.0))
+    return body, mask_of(seams) * body
+
+
+SHELL = (232, 214, 170)
+SEAM = (120, 92, 70)
+
+
+def v_shell_molt():
+    old, old_seams = carapace(-14, -34, 1.05, 0.25)
+    hollow = mask_of(lambda c: c.fill(ellipse(-14, -34, 52, 66, 0.25), 1.0))
+    new, new_seams = carapace(16, 30, 0.85, -0.1)
+    return [(np.clip(old - hollow * 0.8, 0, 1), (205, 190, 200), 0.75, 0), (old_seams * 0.6, SEAM, 0.5, 0),
+            (new, SHELL, 1.0, 8), (new_seams, SEAM, 0.85, 0)]
+
+
+def v_shell_crack():
+    body, seams = carapace(0, 0, 1.25)
+    crack = mask_of(lambda c: [line(c, *a, *b, 3.2) for a, b in
+                               [((-6, 96), (8, 60)), ((8, 60), (-10, 30)), ((-10, 30), (12, 0)), ((12, 0), (-6, -28)),
+                                ((-6, -28), (10, -62)), ((10, -62), (-4, -96)), ((12, 0), (44, 12)), ((-10, 30), (-46, 40))]])
+    return [(body, SHELL, 1.0, 0), (seams, SEAM, 0.85, 0), (crack, (255, 250, 220), 1.0, 7)]
+
+
+def v_shell_plates():
+    body, seams = carapace(0, 14, 1.0)
+    plates = mask_of(lambda c: [c.fill(shifted([(-12, -8), (12, -8), (15, 7), (-15, 7)], x, y, sc, a), 1.0)
+                                for x, y, sc, a in [(-46, -78, 1.0, 0.5), (40, -88, 0.9, -0.7), (-14, -106, 0.8, 1.1),
+                                                    (58, -54, 0.75, -1.4), (-62, -46, 0.7, 2.1)]])
+    return [(plates, SHELL, 0.85, 0), (body, SHELL, 1.0, 6), (seams, SEAM, 0.85, 0)]
+
+
+def v_shell_absorb():
+    body, seams = carapace(0, 0, 1.15)
+    hollow = mask_of(lambda c: c.fill(ellipse(0, 0, 54, 70), 1.0))
+    shots = [(0.3, 112), (1.2, 100), (2.4, 108), (3.4, 118), (4.4, 104), (5.4, 114)]
+    dots = mask_of(lambda c: [c.fill(circle(math.cos(a) * r, math.sin(a) * r, 7 - r / 30), 1.0) for a, r in shots])
+    trails = mask_of(lambda c: [line(c, math.cos(a) * r, math.sin(a) * r, math.cos(a) * (r + 32), math.sin(a) * (r + 32), 2.2)
+                                for a, r in shots])
+    return [(np.clip(body - hollow * 0.55, 0, 1), (230, 215, 235), 0.9, 6), (seams * 0.8, SEAM, 0.6, 0),
+            (trails, (255, 150, 120), 0.5, 0), (dots, (255, 190, 150), 1.0, 5)]
+
+
+def v_shell_split():
+    left, ls = carapace(-30, -6, 1.0, 0.3)
+    right, rs = carapace(30, -6, 1.0, -0.3)
+    cut_l = mask_of(lambda c: c.fill([(-200, -200), (-12, -200), (-12, 200), (-200, 200)], 1.0))
+    cut_r = mask_of(lambda c: c.fill([(12, -200), (200, -200), (200, 200), (12, 200)], 1.0))
+    gap = mask_of(lambda c: c.fill([(-7, -84), (7, -84), (7, 84), (-7, 84)], 1.0))
+    return [(gap, (255, 245, 210), 1.0, 10), (left * cut_l, SHELL, 1.0, 0), (ls * cut_l, SEAM, 0.85, 0),
+            (right * cut_r, SHELL, 1.0, 0), (rs * cut_r, SEAM, 0.85, 0)]
+
+
+VARIANTS = {"husk": v_husk, "egg": v_egg, "skin": v_skin, "absorb": v_absorb, "flake": v_flake,
+            "shell_molt": v_shell_molt, "shell_crack": v_shell_crack, "shell_plates": v_shell_plates,
+            "shell_absorb": v_shell_absorb, "shell_split": v_shell_split}
 
 
 def render(variant, seed=29):
