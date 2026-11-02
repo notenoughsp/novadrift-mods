@@ -156,44 +156,47 @@ static void reflect_shot(void *p, void *ctx) {
     if (m != -1) set_builtin(p, VAR("mask_index"), NO_INDEX, &mask);
 }
 
-static void whip_reflect(void *w, RValue shot, double tx, double ty) {
-    if (inst_get(w, w, shot, GSTR("revenge")) > 0) return;  // already reflected
-    double sx = inst_get(w, w, shot, GSTR("x")), sy = inst_get(w, w, shot, GSTR("y"));
-    Reflect r;
-    // Back at the shooter if it still exists, else straight back
-    RValue shooter = inst_get_rv(w, w, shot, GSTR("shooter"));
-    RValue alive = call_bi(w, w, BI("instance_exists"), 1, &shooter);
+typedef struct { RValue whip; double tx, ty, revenge; } BlockCtx;
+
+// Runs on each enemy projectile (with): touching the tail -> batted back
+static void block_shot(void *p, void *ctx) {
+    BlockCtx *b = ctx;
+    if (get_var(p, VAR("revenge")) > 0) return;  // already reflected
+    RValue x = get_builtin(p, VAR("x")), y = get_builtin(p, VAR("y"));
+    RValue a[3] = { x, y, b->whip };
+    RValue hit = call_bi(p, p, BI("place_meeting"), 3, a);  // tail's precise mask
+    double touching = 0, sx = 0, sy = 0;
+    if (!rv_get(&hit, &touching) || !touching) return;
+    rv_get(&x, &sx);
+    rv_get(&y, &sy);
+
+    // Back at the shooter if it still exists, else away from the tail base
+    Reflect r = { .revenge = b->revenge, .object = -1 };
+    int shooter_id = VAR("shooter");
+    RValue shooter = shooter_id >= 0 ? *g_get_ref(p, shooter_id) : (RValue){ .kind = 5 };
+    RValue alive = call_bi(p, p, BI("instance_exists"), 1, &shooter);
     double ok = 0;
     rv_get(&alive, &ok);
     if (ok && is_instance(&shooter)) {
-        double ex = inst_get(w, w, shooter, GSTR("x")), ey = inst_get(w, w, shooter, GSTR("y"));
+        double ex = inst_get(p, p, shooter, GSTR("x")), ey = inst_get(p, p, shooter, GSTR("y"));
         r.dir = atan2(-(ey - sy), ex - sx) * 180 / M_PI;
-    } else if ((sx - tx) * (sx - tx) + (sy - ty) * (sy - ty) > 1) {
-        r.dir = atan2(-(sy - ty), sx - tx) * 180 / M_PI;  // away from the tail base
+    } else if ((sx - b->tx) * (sx - b->tx) + (sy - b->ty) * (sy - b->ty) > 1) {
+        r.dir = atan2(-(sy - b->ty), sx - b->tx) * 180 / M_PI;
     } else {
-        r.dir = inst_get(w, w, shot, GSTR("direction")) + 180;
+        RValue d = get_builtin(p, VAR("direction"));
+        rv_get(&d, &r.dir);
+        r.dir += 180;
     }
-    r.revenge = g_powers ? get_var(g_powers, VAR("reflectMult")) : 1;
-    if (r.revenge <= 0) r.revenge = 1;
-    r.object = -1;
-    with_instances(w, w, shot, reflect_shot, &r);
+    reflect_shot(p, &r);
     if (++g_reflected <= 5 || g_reflected % 50 == 0)
         logf_("Whip: projectile %s batted back (%d so far)", object_name((int)r.object), g_reflected);
 }
 
-// Enemy projectiles touching the tail (its precise mask, current frame) are batted back
-static void whip_block(void *w, double x, double y) {
-    RValue a[3];
-    make_real(&a[0], x);
-    make_real(&a[1], y);
-    a[2] = obj_ref(g_obj_enemy_shot);
-    for (int n = 0; n < 16; n++) {  // changed instances no longer match oEnemyProjectile
-        RValue shot = call_bi(w, w, BI("instance_place"), 3, a);
-        if (!is_instance(&shot)) break;
-        double before = g_reflected;
-        whip_reflect(w, shot, x, y);
-        if (g_reflected == before) break;  // not reflectable, avoid finding it again
-    }
+// Like the game: with (oEnemyProjectile) check contact with the tail instance
+static void whip_block(void *w, RValue whip, double tx, double ty) {
+    BlockCtx b = { whip, tx, ty, g_powers ? get_var(g_powers, VAR("reflectMult")) : 1 };
+    if (b.revenge <= 0) b.revenge = 1;
+    with_instances(w, w, obj_ref(g_obj_enemy_shot), block_shot, &b);
 }
 
 // Keep active lashes at the stern and swing them through the arc
@@ -222,7 +225,7 @@ static void whip_update(void *self, void *other, double px, double py, double fa
         double frame = floor(t * g_wc.anim);
         set_builtin_real(w, vindex, NO_INDEX, frame >= g_wc.anim ? g_wc.anim - 1 : frame);
         set_builtin_real(w, vyscale, NO_INDEX, -g_whips[i].side * g_wc.scale);
-        if (g_wc.block && g_obj_enemy_shot >= 0) whip_block(w, tx, ty);
+        if (g_wc.block && g_obj_enemy_shot >= 0) whip_block(w, g_whips[i].id, tx, ty);
         if (++g_whips[i].frame > g_wc.frames) {
             // Fade out: the instance destroys itself next step
             set_self_var(w, VAR("fade"), 1);
