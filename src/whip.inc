@@ -84,14 +84,68 @@ static void ev_tail_create(void *self, void *other) {
 // Replaces oVenomStrike's hue (0), trail (1), auto fade (2) and flame (5) alarms
 static void ev_tail_noop(void *self, void *other) {}
 
-static const ObjEvent TAIL_EVENTS[] = {
+// Hit: the venom strike damage (venomStrikeHitsSolid) as a direct hit. The game
+// also ignites the enemy there (dotDurationList[4] = igniteTime), which we restore,
+// and books the damage as burn (yellow numbers). Tail damage is collected per
+// enemy instead and shown as white direct-hit numbers (showDamage) every 8 frames.
+static GmlEventFn g_venom_collision;
+static GmlFn o_record_burn, g_show_damage;
+static int g_tail_hit;
+static struct { RValue id; double sum; } g_tail_dmg[32];
+static int g_tail_dmg_count;
+
+static void *hk_record_burn(void *self, void *other, void *ret, int argc, void **argv) {
+    double amount = 0;
+    if (!g_tail_hit || !g_show_damage || argc < 1 || !rv_get(argv[0], &amount))
+        return o_record_burn(self, other, ret, argc, argv);
+    RValue id = get_builtin(self, VAR("id"));  // self = the enemy
+    int i = 0;
+    while (i < g_tail_dmg_count && memcmp(&g_tail_dmg[i].id, &id, 8)) i++;
+    if (i == g_tail_dmg_count && i < 32) g_tail_dmg[g_tail_dmg_count++] = (typeof(g_tail_dmg[0])){ id, 0 };
+    if (i < 32) g_tail_dmg[i].sum += amount;
+    ((RValue *)ret)->kind = 5;
+    return ret;
+}
+
+static void show_tail_damage(void *self, void *other) {
+    for (int i = 0; i < g_tail_dmg_count; i++) {
+        RValue alive = call_bi(self, other, BI("instance_exists"), 1, &g_tail_dmg[i].id), res = { .kind = 5 };
+        double ok = 0;
+        if (!rv_get(&alive, &ok) || !ok || g_tail_dmg[i].sum <= 0) continue;
+        RValue a[3] = { { .real = g_tail_dmg[i].sum, .kind = KIND_REAL }, { .real = 1, .kind = KIND_BOOL },
+                        g_tail_dmg[i].id };  // amount, at target, target
+        void *argv[3] = { &a[0], &a[1], &a[2] };
+        g_show_damage(self, other, &res, 3, argv);
+    }
+    g_tail_dmg_count = 0;
+}
+
+static void tail_hit(void *self, void *other) {
+    g_tail_hit = 1;
+    g_venom_collision(self, other);
+    g_tail_hit = 0;
+}
+
+static void ev_tail_collision(void *self, void *other) {
+    RValue id = get_builtin(other, VAR("id"));
+    RValue list = inst_get_rv(self, other, id, GSTR("dotDurationList"));
+    if ((list.kind & 0xffffff) != 2) { tail_hit(self, other); return; }  // 2 = GML array
+    RValue a[3] = { list };
+    make_real(&a[1], 4);
+    a[2] = call_bi(self, other, BI("array_get"), 2, a);
+    tail_hit(self, other);
+    if ((a[2].kind & 0xffffff) != 5) call_bi(self, other, BI("array_set"), 3, a);
+}
+
+static ObjEvent g_tail_events[] = {
     { EV_CREATE, 0, ev_tail_create },
     { EV_ALARM, 0, ev_tail_noop },
     { EV_ALARM, 1, ev_tail_noop },
     { EV_ALARM, 2, ev_tail_noop },
     { EV_ALARM, 5, ev_tail_noop },
+    { EV_COLLISION, -1, ev_tail_collision },  // subtype = oSolid, set at install
 };
-static ObjDef g_tail_def = { "oStingerTail", "oVenomStrike", "oVenomStrike", 0, TAIL_EVENTS, 5, -1, &g_obj_tail };
+static ObjDef g_tail_def = { "oStingerTail", "oVenomStrike", "oVenomStrike", 0, g_tail_events, 6, -1, &g_obj_tail };
 
 // Nearest instance of obj around a point behind the ship; 1 if it is in range and in
 // the cone behind (GameMaker: y points down). *dir = direction to it in radians.
@@ -253,6 +307,8 @@ static void hk_player_step(void *self, void *other) {
     double px = inst_get(self, other, player, GSTR("x")), py = inst_get(self, other, player, GSTR("y"));
     double face = inst_get(self, other, player, GSTR("image_angle")) * M_PI / 180;
     whip_update(self, other, px, py, face);
+    static int tick;
+    if (g_tail_dmg_count && (++tick % 8 == 0 || !g_whip_count)) show_tail_damage(self, other);
     if (g_whip_cooldown > 0) { g_whip_cooldown--; return; }
     if (active) whip_strike(self, other, player, px, py, face);
 }
@@ -267,8 +323,15 @@ static void install_whip(void) {
         logf_("Whip: projectile reflection unavailable");
     }
     g_venom_create = (GmlEventFn)find_gml_function("gml_Object_oVenomStrike_Create_0");
-    if (g_obj_player < 0 || g_obj_solid < 0 || !g_venom_create) { logf_("Whip: objects missing"); return; }
+    g_venom_collision = (GmlEventFn)find_gml_function("gml_Object_oVenomStrike_Collision_oSolid");
+    if (g_obj_player < 0 || g_obj_solid < 0 || !g_venom_create || !g_venom_collision) {
+        logf_("Whip: objects missing");
+        return;
+    }
+    g_tail_events[5].subtype = g_obj_solid;
     register_object(&g_tail_def);
+    g_show_damage = (GmlFn)find_gml_function("gml_Script_showDamage");
+    o_record_burn = hook(find_gml_function("gml_Script_recordDamageBurn"), hk_record_burn, "recordDamageBurn");
     o_player_step = hook_event("oPlayer", "Step_0", hk_player_step);
     if (o_player_step)
         logf_("Whip active (damage %g per frame, lash %d frames, every %d frames)", g_wc.damage, g_wc.frames,
