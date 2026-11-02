@@ -42,6 +42,7 @@ public class DecompileToFiles extends GhidraScript {
                 File target = new File(out, "0x" + s.replaceFirst("^0x", "").toLowerCase() + ".c");
                 if (target.exists()) continue;  // already done (resume)
                 Function f = getFunctionAt(toAddr(s));
+                if (f == null) f = createFunction(toAddr(s), null);  // not defined by the analysis (in memory only)
                 if (f != null) functions.add(f);
                 else println("no function at " + s);
             }
