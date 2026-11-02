@@ -53,6 +53,23 @@ static void molting_config(void) {
 
 static void ev_molt_create(void *self, void *other) { g_molt_base_create(self, other); }
 
+static const char *WILD_POOLS[] = { "wildMods", "wildModsRare", "wildModsVeryRare" };
+
+// Takes every copy of Molting out of a wild pool so it can only be picked once
+static void molt_remove_from_pool(void *powers, void *other, const char *pool_name) {
+    int pool = var_id(pool_name);
+    if (pool < 0) return;
+    RValue list = *g_get_ref(powers, pool);
+    for (int n = 0; n < 8; n++) {
+        RValue a[2] = { list, obj_ref(MOLT->id) };
+        RValue pos = call_bi(powers, other, BI("ds_list_find_index"), 2, a);
+        double i = -1;
+        if (!rv_get(&pos, &i) || i < 0) return;
+        make_real(&a[1], i);
+        call_bi(powers, other, BI("ds_list_delete"), 2, a);
+    }
+}
+
 static void ev_molt_pick(void *self, void *other) {
     int pool = var_id(MOLT->list_var);
     if (g_powers && pool >= 0) {
@@ -60,6 +77,7 @@ static void ev_molt_pick(void *self, void *other) {
         RValue a[2] = { *g_get_ref(g_powers, pool), obj_ref(MOLT->id) }, res = { .kind = 5 };
         void *argv[2] = { &a[0], &a[1] };
         g_gain_mod(g_powers, self, &res, 2, argv);
+        for (int i = 0; i < 3; i++) molt_remove_from_pool(g_powers, self, WILD_POOLS[i]);
     }
     g_molt.owned = 1;
     logf_("Molting picked");
@@ -70,9 +88,9 @@ static void ev_molt_pick(void *self, void *other) {
 static void molting_run_start(void *powers, void *other) {
     memset(&g_molt, 0, sizeof g_molt);
     if (!g_mc.on || !g_mc.force_offer || MOLT->id < 0) return;
-    const char *extra[] = { "wildMods", "wildModsVeryRare" };
-    for (int i = 0; i < 2; i++) {
-        int list = var_id(extra[i]);
+    for (int i = 0; i < 3; i++) {
+        if (!strcmp(WILD_POOLS[i], MOLT->list_var)) continue;  // added with the other gear
+        int list = var_id(WILD_POOLS[i]);
         if (list < 0) continue;
         RValue a[2] = { *g_get_ref(powers, list), obj_ref(MOLT->id) };
         call_bi(powers, other, BI("ds_list_add"), 2, a);

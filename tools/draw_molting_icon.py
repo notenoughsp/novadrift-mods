@@ -1,9 +1,16 @@
-"""Draws the Molting wild mod hex icon (268x308): a cracked empty husk with the
-ship slipping out of it, in the style of Nova Drift upgrade icons.
+"""Draws the Molting wild mod hex icon (268x308) in the style of Nova Drift upgrade icons.
 
-Usage:  python -I draw_molting_icon.py <output_dir>
-Output: molting_icon.png
+Variants (prototypes):
+  husk    - cracked empty husk with the ship slipping out of it (default)
+  egg     - ship breaking out of a cracked shell, shards flying
+  skin    - a shed, hollow segmented skin curling away
+  absorb  - ghostly husk swallowing incoming shots
+  flake   - ship shedding its plates, scales drifting off behind it
+
+Usage:  python -I draw_molting_icon.py <output_dir> [variant ...]
+Output: molting_icon.png (first variant) or molting_icon_<variant>.png for several
 """
+import math
 import os
 import sys
 
@@ -11,60 +18,118 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from draw_icon import H, W, blur, hexagon, mask_of, nebula  # noqa: E402
+from draw_scorpion import circle, write_png  # noqa: E402
 
 SHIP = [(0, 70), (34, -40), (14, -26), (0, -46), (-14, -26), (-34, -40)]  # nose up, y up
 
 
-def shifted(points, dx, dy, scale=1.0):
-    return [(x * scale + dx, y * scale + dy) for x, y in points]
+def shifted(points, dx, dy, scale=1.0, angle=0.0):
+    ca, sa = math.cos(angle), math.sin(angle)
+    return [((x * ca - y * sa) * scale + dx, (x * sa + y * ca) * scale + dy) for x, y in points]
 
 
-def husk(c):
-    c.fill(shifted(SHIP, -10, -38, 1.25), 1.0)
+def poly(points):
+    return lambda c: c.fill(points, 1.0)
 
 
-def husk_hollow(c):
-    c.fill(shifted(SHIP, -10, -38, 0.95), 1.0)
+def line(c, x0, y0, x1, y1, w):
+    dx, dy = x1 - x0, y1 - y0
+    ln = math.hypot(dx, dy) or 1
+    nx, ny = -dy / ln * w, dx / ln * w
+    c.fill([(x0 + nx, y0 + ny), (x1 + nx, y1 + ny), (x1 - nx, y1 - ny), (x0 - nx, y0 - ny)], 1.0)
 
 
-def crack(c):
-    pts = [(-30, 40), (-14, 18), (-22, 2), (-4, -20), (-12, -36), (4, -58)]
-    for (x0, y0), (x1, y1) in zip(pts, pts[1:]):
-        c.fill([(x0 - 3, y0), (x0 + 3, y0), (x1 + 3, y1), (x1 - 3, y1)], 1.0)
+# Each variant returns layers: [(mask, rgb, opacity, glow radius)], drawn in order
+def v_husk():
+    shell = np.clip(mask_of(poly(shifted(SHIP, -10, -38, 1.25))) - mask_of(poly(shifted(SHIP, -10, -38, 0.95))), 0, 1)
+    cracks = mask_of(lambda c: [line(c, *p, 3) for p in [(-30, 40, -14, 18), (-14, 18, -22, 2), (-22, 2, -4, -20),
+                                                         (-4, -20, -12, -36), (-12, -36, 4, -58)]])
+    return [(np.clip(shell - cracks, 0, 1), (200, 190, 210), 0.75, 0),
+            (mask_of(poly(shifted(SHIP, 18, 42, 0.95))), (255, 248, 235), 1.0, 8)]
 
 
-def ship(c):
-    c.fill(shifted(SHIP, 18, 42, 0.95), 1.0)
+def v_egg():
+    egg = lambda c: c.fill([(math.cos(a) * 62 + 0, math.sin(a) * 78 - 30) for a in np.linspace(0, 2 * math.pi, 48)], 1.0)
+    shell = np.clip(mask_of(egg) - mask_of(lambda c: c.fill(
+        [(math.cos(a) * 52, math.sin(a) * 68 - 30) for a in np.linspace(0, 2 * math.pi, 48)], 1.0)), 0, 1)
+    top = mask_of(lambda c: c.fill([(-90, -10), (90, -10), (90, 120), (-90, 120)], 1.0))  # top half broken away
+    zig = mask_of(lambda c: c.fill([(-70, -10), (-46, 8), (-26, -14), (-6, 10), (16, -12), (36, 8), (58, -12),
+                                    (70, -10), (70, -30), (-70, -30)], 1.0))
+    lower = np.clip(shell * (1 - top) + shell * zig, 0, 1)
+    shards = mask_of(lambda c: [c.fill(shifted([(-10, -6), (10, -8), (4, 9)], x, y, s, a), 1.0)
+                                for x, y, s, a in [(-70, 60, 1.4, 0.5), (66, 72, 1.2, -0.8), (-46, 100, 1.0, 1.4),
+                                                   (52, 108, 0.9, 2.2)]])
+    return [(lower, (220, 205, 230), 0.85, 0), (shards, (220, 205, 230), 0.75, 0),
+            (mask_of(poly(shifted(SHIP, 0, 34, 1.0))), (255, 248, 235), 1.0, 8)]
 
 
-def main(out):
-    os.makedirs(out, exist_ok=True)
+def v_skin():
+    rings = []
+    for i in range(9):
+        t = i / 8
+        ang = -2.2 + t * 3.6
+        rad = 70 - 34 * t
+        rings.append((math.cos(ang) * rad - 6, math.sin(ang) * rad + 6, 26 - 14 * t))
+    outer = mask_of(lambda c: [c.fill(circle(x, y, r), 1.0) for x, y, r in rings])
+    inner = mask_of(lambda c: [c.fill(circle(x, y, r * 0.62), 1.0) for x, y, r in rings])
+    seams = mask_of(lambda c: [line(c, x - r * 0.9, y, x + r * 0.9, y, 1.6) for x, y, r in rings])
+    skin = np.clip(outer - inner * 0.85 - seams * 0.5, 0, 1)
+    return [(skin, (235, 215, 160), 0.9, 6)]
+
+
+def v_absorb():
+    ghost = mask_of(poly(shifted(SHIP, 0, 0, 1.45)))
+    hollow = mask_of(poly(shifted(SHIP, 0, 0, 1.1)))
+    shots = mask_of(lambda c: [c.fill(circle(math.cos(a) * r, math.sin(a) * r, 7 - r / 30), 1.0)
+                               for a, r in [(0.3, 110), (1.2, 96), (2.4, 104), (3.4, 118), (4.4, 100), (5.4, 112)]])
+    trails = mask_of(lambda c: [line(c, math.cos(a) * r, math.sin(a) * r, math.cos(a) * (r + 34), math.sin(a) * (r + 34),
+                                     2.2) for a, r in [(0.3, 110), (1.2, 96), (2.4, 104), (3.4, 118), (4.4, 100),
+                                                       (5.4, 112)]])
+    return [(np.clip(ghost - hollow, 0, 1), (230, 220, 240), 0.9, 6), (hollow, (200, 180, 220), 0.35, 0),
+            (trails, (255, 150, 120), 0.5, 0), (shots, (255, 190, 150), 1.0, 5)]
+
+
+def v_flake():
+    ship = mask_of(poly(shifted(SHIP, 0, 30, 1.0)))
+    plates = mask_of(lambda c: [c.fill(shifted([(-9, -7), (9, -7), (11, 6), (-11, 6)], x, y, s, a), 1.0)
+                                for x, y, s, a in [(-30, -40, 1.3, 0.4), (24, -58, 1.1, -0.6), (-12, -78, 1.0, 1.0),
+                                                   (34, -92, 0.85, -1.3), (-38, -104, 0.7, 2.0), (6, -118, 0.6, 0.2)]])
+    return [(plates, (210, 200, 225), 0.8, 0), (ship, (255, 248, 235), 1.0, 8)]
+
+
+VARIANTS = {"husk": v_husk, "egg": v_egg, "skin": v_skin, "absorb": v_absorb, "flake": v_flake}
+
+
+def render(variant, seed=29):
     hex_outer = mask_of(lambda c: hexagon(c, 152))
     hex_inner = mask_of(lambda c: hexagon(c, 141))
-    shell = np.clip(mask_of(husk) - mask_of(husk_hollow), 0, 1)
-    cracks = mask_of(crack) * mask_of(husk)
-    body = mask_of(ship)
-
-    n = nebula(29)
+    n = nebula(seed)
     t = np.clip((n - 0.35) * 1.8, 0, 1)
     rgb = np.stack([170 + 60 * t, 92 + 50 * t, 150 + 40 * t], axis=-1)  # wild: warm violet
-    rng = np.random.default_rng(7)
-    stars = (rng.random((H, W)) > 0.9975).astype(float)
+    stars = (np.random.default_rng(7).random((H, W)) > 0.9975).astype(float)
     rgb = rgb * (1 - stars[..., None] * 0.7) + 255 * stars[..., None] * 0.7
-
-    # Dim husk with cracks, bright ship with glow
-    shell = np.clip(shell - cracks, 0, 1)
-    rgb = rgb * (1 - shell[..., None] * 0.75) + np.array([200, 190, 210]) * shell[..., None] * 0.75
-    glow = np.clip(blur(body, 8) * 2.0, 0, 1)
-    rgb = rgb * (1 - glow[..., None] * 0.8) + np.array([255, 220, 160]) * glow[..., None] * 0.8
-    rgb = rgb * (1 - body[..., None]) + np.array([255, 248, 235]) * body[..., None]
-
+    for mask, color, opacity, glow in VARIANTS[variant]():
+        if glow:
+            g = np.clip(blur(mask, glow) * 2.0, 0, 1) * 0.7
+            rgb = rgb * (1 - g[..., None]) + np.array([255, 220, 170]) * g[..., None]
+        m = mask * opacity
+        rgb = rgb * (1 - m[..., None]) + np.array(color) * m[..., None]
     border = np.clip(hex_outer - hex_inner, 0, 1)
     rgb = rgb * (1 - border[..., None])
-    img = np.dstack([np.clip(rgb, 0, 255), hex_outer * 255]).astype(np.uint8)
-    from draw_scorpion import write_png  # noqa: E402
-    write_png(os.path.join(out, "molting_icon.png"), W, H, [bytearray(img[y].tobytes()) for y in range(H)])
+    return np.dstack([np.clip(rgb, 0, 255), hex_outer * 255]).astype(np.uint8)
+
+
+def main(out, variants):
+    os.makedirs(out, exist_ok=True)
+    for v in variants:
+        img = render(v)
+        name = "molting_icon.png" if len(variants) == 1 else f"molting_icon_{v}.png"
+        write_png(os.path.join(out, name), W, H, [bytearray(img[y].tobytes()) for y in range(H)])
+    if len(variants) > 1:  # side-by-side preview
+        strip = np.concatenate([render(v) for v in variants], axis=1)
+        write_png(os.path.join(out, "molting_icons_preview.png"), W * len(variants), H,
+                  [bytearray(strip[y].tobytes()) for y in range(H)])
 
 
 if __name__ == "__main__":
-    main(sys.argv[1] if len(sys.argv) > 1 else ".")
+    main(sys.argv[1] if len(sys.argv) > 1 else ".", sys.argv[2:] or ["husk"])
