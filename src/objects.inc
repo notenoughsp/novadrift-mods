@@ -10,11 +10,14 @@ enum { EV_CREATE = 0, EV_DESTROY = 1, EV_ALARM = 2, EV_STEP = 3, EV_COLLISION = 
 
 typedef struct { int type, subtype; GmlEventFn fn; } ObjEvent;
 typedef struct {
-    const char *name, *parent;  // parent: existing object name or NULL
-    int visible;
-    const ObjEvent *events;
+    const char *name;
+    const char *parent;         // existing object name; NULL = the clone's parent (or none)
+    const char *clone;          // copy sprite, mask, depth and flags from this object (or NULL)
+    int visible;                // without clone
+    const ObjEvent *events;     // own events; parent events are inherited as usual
     int event_count;
     int index;                  // object index once created, else -1
+    int *index_out;             // also receives the index (optional)
 } ObjDef;
 
 // YYC function table entry the runtime calls events through
@@ -93,6 +96,16 @@ static void *make_event(const char *obj_name, const ObjEvent *e, int obj_index, 
     return event;
 }
 
+// CObjectGM of an existing object (hash buckets of 16 bytes, node {next +8, index +0x10, obj +0x18})
+static uint8_t *object_struct(int index) {
+    uint8_t *hash = *(uint8_t **)rt_global(RVA_OBJECT_HASH);
+    if (!hash || index < 0) return NULL;
+    uint8_t *node = *(uint8_t **)(*(uint8_t **)hash + (size_t)(index & *(int *)(hash + 8)) * 16);
+    for (; node; node = *(uint8_t **)(node + 8))
+        if (*(int *)(node + 0x10) == index) return *(uint8_t **)(node + 0x18);
+    return NULL;
+}
+
 static void create_object(ObjDef *def, int template_code) {
     int *count = (int *)rt_global(RVA_OBJECT_COUNT);
     void *hash = *(void **)rt_global(RVA_OBJECT_HASH);
@@ -101,15 +114,23 @@ static void create_object(ObjDef *def, int template_code) {
         logf_("Objects: count mismatch (runtime %d, data.win %u), %s skipped", index, g_obj_count, def->name);
         return;
     }
+    uint8_t *tmpl = def->clone ? object_struct(find_object(def->clone)) : NULL;
+    if (def->clone && !tmpl) { logf_("Objects: clone source %s not found, %s skipped", def->clone, def->name); return; }
     uint8_t *obj = rt_zalloc(0x98);
     if (!obj) return;
     g_obj_ctor(obj, index);
     g_obj_set_name(obj, def->name);
-    int parent = def->parent ? find_object(def->parent) : -1;
-    *(uint32_t *)(obj + 0x80) = (def->visible ? 2 : 0) | 0x80;  // visible, managed
-    *(int *)(obj + 0x84) = -1;                                 // sprite
-    *(int *)(obj + 0x8c) = parent;                              // linked by the prepare step
-    *(int *)(obj + 0x90) = -1;                                 // mask
+    int parent = def->parent ? find_object(def->parent) : tmpl ? *(int *)(tmpl + 0x8c) : -1;
+    if (tmpl) {
+        memcpy(obj + 0x28, tmpl + 0x28, 0x20);  // physics flags and parameters (shape list stays empty)
+        memcpy(obj + 0x80, tmpl + 0x80, 0xc);   // flags, sprite, depth
+        *(int *)(obj + 0x90) = *(int *)(tmpl + 0x90);  // mask
+    } else {
+        *(uint32_t *)(obj + 0x80) = (def->visible ? 2 : 0) | 0x80;  // visible, managed
+        *(int *)(obj + 0x84) = -1;                                 // sprite
+        *(int *)(obj + 0x90) = -1;                                 // mask
+    }
+    *(int *)(obj + 0x8c) = parent;  // linked by the prepare step
     for (int i = 0; i < def->event_count; i++) {
         void *event = make_event(def->name, &def->events[i], index, template_code);
         int64_t key = (int64_t)def->events[i].type << 32 | (uint32_t)def->events[i].subtype;
@@ -121,8 +142,9 @@ static void create_object(ObjDef *def, int template_code) {
     g_obj_names = realloc(g_obj_names, (g_obj_count + 1) * sizeof *g_obj_names);
     g_obj_names[g_obj_count++] = _strdup(def->name);
     def->index = index;
-    logf_("Objects: created %s (index %d, parent %s, %d events)", def->name, index,
-          parent >= 0 ? def->parent : "none", def->event_count);
+    if (def->index_out) *def->index_out = index;
+    logf_("Objects: created %s (index %d, parent %s, %d events)", def->name, index, object_name(parent),
+          def->event_count);
 }
 
 // Runs once while data.win is loaded, after all OBJT objects exist
@@ -177,7 +199,7 @@ static const ObjEvent PROBE_EVENTS[] = {
     { EV_DESTROY, 0, probe_destroy },
     { EV_CLEANUP, 0, probe_cleanup },
 };
-static ObjDef g_probe_def = { "oModProbe", NULL, 0, PROBE_EVENTS, 4, -1 };
+static ObjDef g_probe_def = { "oModProbe", NULL, NULL, 0, PROBE_EVENTS, 4, -1, NULL };
 
 static void spawn_probe(void *self, void *other) {
     if (!g_object_probe || g_probe_def.index < 0) return;
@@ -203,5 +225,7 @@ static void install_objects(void) {
     g_code_ctor = p[4];
     g_event_insert = p[5];
     if (g_object_probe) register_object(&g_probe_def);
-    if (g_objdef_count) o_obj_prepare = (VoidFn)hook(p[6], hk_obj_prepare, "objPrepare");
+    o_obj_prepare = (VoidFn)hook(p[6], hk_obj_prepare, "objPrepare");
 }
+
+static int objects_available(void) { return o_obj_prepare != NULL; }

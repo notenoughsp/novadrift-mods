@@ -671,8 +671,9 @@ static void *hk_end_score(void *self, void *other, void *ret, int argc, void **a
     return o_end_score(self, other, ret, argc, argv);
 }
 
-#include "newgear.inc"
+#include "gml.inc"
 #include "objects.inc"
+#include "newgear.inc"
 #include "whip.inc"
 
 static void install(void) {
@@ -732,8 +733,8 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved) {
     install_settings_file();
     load_ini();
     install_profile_files();
-    install_newgear();
     install_objects();
+    install_newgear();
     install_whip();
     logf_("Leaderboard block: %s", g_block_always ? "always on" : "only with modded values");
     return TRUE;

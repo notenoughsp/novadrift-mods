@@ -1,10 +1,11 @@
 // ------------------------------------------------------------- Tail whip ----
 // When an enemy is behind the ship, an animated tail swings through the area
-// behind it. Hits use an oVenomStrike (the game's damage logic) with its
-// flames, trail and movement disabled. Values: whip_* in [newweapon].
+// behind it. The tail is its own object oStingerTail, a child of oVenomStrike:
+// it inherits the game's hit logic (step, collision with oSolid) while its
+// flame, trail, hue and fade alarms are empty. Values: whip_* in [newweapon].
 
-static GmlEventFn o_player_step, o_venom_create;
-static int g_obj_solid = -1, g_obj_venom = -1, g_obj_enemy_shot = -1, g_obj_reflected = -1;
+static GmlEventFn o_player_step, g_venom_create;
+static int g_obj_solid = -1, g_obj_tail = -1, g_obj_enemy_shot = -1, g_obj_reflected = -1;
 static int g_reflected;  // reflected projectiles (log)
 static int g_whip_cooldown;
 
@@ -43,8 +44,7 @@ static void whip_config(void) {
 // Active lashes: instance pointer (direct variables), instance ID (instance_exists)
 static struct { void *inst; RValue id; int frame; double dir, side; } g_whips[4];
 static int g_whip_count, g_whip_side = 1;
-static void *g_whip_new;  // new instance reported by the create hook
-static int g_whip_spawning;
+static void *g_whip_new;  // new instance reported by the create event
 static RValue g_whip_sprite;
 static int g_whip_sprite_state;  // 0 = not loaded, 1 = loaded, -1 = failed
 
@@ -65,16 +65,10 @@ static int load_whip_sprite(void *self, void *other) {
     return 1;
 }
 
-// Turn a new oVenomStrike into a tail lash (only while we spawn it)
-static void hk_venom_create(void *self, void *other) {
-    o_venom_create(self, other);
-    if (!g_whip_spawning) return;
+// oStingerTail: the venom strike setup, then the tail look
+static void ev_tail_create(void *self, void *other) {
+    g_venom_create(self, other);
     g_whip_new = self;
-    int alarm = VAR("alarm");
-    set_builtin_real(self, alarm, 0, -1);  // hue cycling
-    set_builtin_real(self, alarm, 1, -1);  // trail
-    set_builtin_real(self, alarm, 2, -1);  // auto fade (we control it)
-    set_builtin_real(self, alarm, 5, -1);  // flame particles
     set_builtin(self, VAR("sprite_index"), NO_INDEX, &g_whip_sprite);
     double blend;
     if (resolve_color(self, other, g_wc.color, &blend)) set_builtin_real(self, VAR("image_blend"), NO_INDEX, blend);
@@ -86,6 +80,18 @@ static void hk_venom_create(void *self, void *other) {
     set_self_var(self, VAR("amplitude"), 0);  // no wobble
     set_self_var(self, VAR("scale"), 1);
 }
+
+// Replaces oVenomStrike's hue (0), trail (1), auto fade (2) and flame (5) alarms
+static void ev_tail_noop(void *self, void *other) {}
+
+static const ObjEvent TAIL_EVENTS[] = {
+    { EV_CREATE, 0, ev_tail_create },
+    { EV_ALARM, 0, ev_tail_noop },
+    { EV_ALARM, 1, ev_tail_noop },
+    { EV_ALARM, 2, ev_tail_noop },
+    { EV_ALARM, 5, ev_tail_noop },
+};
+static ObjDef g_tail_def = { "oStingerTail", "oVenomStrike", "oVenomStrike", 0, TAIL_EVENTS, 5, -1, &g_obj_tail };
 
 // Nearest instance of obj around a point behind the ship; 1 if it is in range and in
 // the cone behind (GameMaker: y points down). *dir = direction to it in radians.
@@ -106,7 +112,7 @@ static int find_behind(void *self, void *other, int obj, double px, double py, d
 }
 
 static void whip_strike(void *self, void *other, RValue player, double px, double py, double face) {
-    if (g_whip_count >= 4 || !load_whip_sprite(self, other)) return;
+    if (g_whip_count >= 4 || g_obj_tail < 0 || !load_whip_sprite(self, other)) return;
     // Enemies first, else incoming projectiles (to bat them back)
     double dir;
     if (!find_behind(self, other, g_obj_solid, px, py, face, &dir) &&
@@ -121,11 +127,9 @@ static void whip_strike(void *self, void *other, RValue player, double px, doubl
     make_real(&a[0], px);
     make_real(&a[1], py);
     make_real(&a[2], -100);
-    a[3] = obj_ref(g_obj_venom);
+    a[3] = obj_ref(g_obj_tail);
     g_whip_new = NULL;
-    g_whip_spawning = 1;
     RValue shot = call_bi(self, other, BI("instance_create_depth"), 4, a);
-    g_whip_spawning = 0;
     if (!g_whip_new || !is_instance(&shot)) return;
     inst_set(self, other, shot, GSTR("leader"), player);
     g_whips[g_whip_count++] = (typeof(g_whips[0])){ g_whip_new, shot, 0, dir * 180 / M_PI, g_whip_side };
@@ -254,18 +258,17 @@ static void hk_player_step(void *self, void *other) {
 }
 
 static void install_whip(void) {
-    if (!g_wc.on || g_gear[1].id < 0) return;
+    if (!g_wc.on || !g_gear[1].def.name) return;  // the weapon's object is registered
     g_obj_solid = find_object("oSolid");
-    g_obj_venom = find_object("oVenomStrike");
     g_obj_enemy_shot = find_object("oEnemyProjectile");  // parent of all enemy shots
     g_obj_reflected = find_object("oEnemyProjectileReflectedObjectClone");
     if (g_obj_reflected < 0 || !g_with_begin || !g_with_next || !g_with_end || !g_get_builtin_var) {
         g_obj_enemy_shot = -1;
         logf_("Whip: projectile reflection unavailable");
     }
-    if (g_obj_player < 0 || g_obj_solid < 0 || g_obj_venom < 0) { logf_("Whip: objects missing"); return; }
-    o_venom_create = hook_event("oVenomStrike", "Create_0", hk_venom_create);
-    if (!o_venom_create) return;
+    g_venom_create = (GmlEventFn)find_gml_function("gml_Object_oVenomStrike_Create_0");
+    if (g_obj_player < 0 || g_obj_solid < 0 || !g_venom_create) { logf_("Whip: objects missing"); return; }
+    register_object(&g_tail_def);
     o_player_step = hook_event("oPlayer", "Step_0", hk_player_step);
     if (o_player_step)
         logf_("Whip active (damage %g per frame, lash %d frames, every %d frames)", g_wc.damage, g_wc.frames,
