@@ -290,15 +290,9 @@ static NewGear *call_upgrade(GmlFn orig, void *self, void *other, void *ret, int
     return NULL;
 }
 
-// Replaces the returned string; language is detected from the base gear's text
+// Replaces the returned string with the INI text (title / short / full)
 static void replace_text(NewGear *g, RValue *ret, const char *key) {
-    char k[40];
-    const char *orig = (ret->kind & 0xffffff) == 1 && ret->ptr ? *(const char **)ret->ptr : "";
-    int german = !strncmp(orig, "FORM", 4) || !strncmp(orig, "WAFFE", 5) || strstr(orig, "Hülle") ||
-                 strstr(orig, "Schaden") || strstr(orig, "Antrieb");
-    snprintf(k, sizeof k, "%s.%s", key, german ? "de" : "en");
-    const char *text = gear_text(g, k);
-    if (!text) text = gear_text(g, key);
+    const char *text = gear_text(g, key);
     if (!text) return;
     // Create GML strings once and reuse them (the getters run every frame)
     static struct { const char *src; RValue rv; } cache[32];
