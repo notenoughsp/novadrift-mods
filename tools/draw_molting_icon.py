@@ -187,7 +187,95 @@ def v_shell_split():
             (right * cut_r, SHELL, 1.0, 0), (rs * cut_r, SEAM, 0.85, 0)]
 
 
+# --- Log variants: the classic "swap the body for a log" trick
+BARK = (130, 86, 52)
+BARK_DARK = (82, 52, 30)
+WOOD = (222, 186, 130)
+RING = (160, 112, 66)
+SMOKE = (238, 232, 242)
+
+
+def log(cx, cy, length=150, r=34, angle=0.5):
+    """Masks (bark, grooves, cut face, rings) of a log lying at an angle (cut face at the +x end)."""
+    ca, sa = math.cos(angle), math.sin(angle)
+
+    def p(x, y):
+        return cx + x * ca - y * sa, cy + x * sa + y * ca
+
+    h = length / 2
+    bark = mask_of(lambda c: c.fill([p(-h, -r), p(h, -r), p(h, r), p(-h, r)], 1.0))
+    back = mask_of(lambda c: c.fill([p(-h + math.cos(t) * r * 0.35, math.sin(t) * r) for t in np.linspace(0, 2 * math.pi, 40)], 1.0))
+    face_pts = lambda k: [p(h + math.cos(t) * r * 0.35 * k, math.sin(t) * r * k) for t in np.linspace(0, 2 * math.pi, 40)]
+    face = mask_of(lambda c: c.fill(face_pts(1.0), 1.0))
+
+    def grooves(c):
+        for y, x0, x1 in [(-22, -60, 30), (-8, -40, 50), (6, -66, 10), (20, -30, 56), (-28, 10, 60), (26, -64, -20)]:
+            line(c, *p(x0, y * r / 34), *p(x1, y * r / 34), 1.8)
+
+    def rings(c):
+        for k in (0.75, 0.5, 0.25):
+            pts = face_pts(k)
+            for a, b in zip(pts, pts[1:] + pts[:1]):
+                line(c, *a, *b, 1.4)
+
+    return np.clip(bark + back, 0, 1), mask_of(grooves), face, mask_of(rings) * face
+
+
+def log_layers(cx, cy, length=150, r=34, angle=0.5, glow=0):
+    bark, grooves, face, rings = log(cx, cy, length, r, angle)
+    return [(bark, BARK, 1.0, glow), (grooves * bark, BARK_DARK, 0.9, 0), (face, WOOD, 1.0, 0), (rings, RING, 0.9, 0)]
+
+
+def puff(points):
+    return mask_of(lambda c: [c.fill(circle(x, y, r), 1.0) for x, y, r in points])
+
+
+def v_log_puff():
+    smoke = puff([(-60, -30, 30), (-30, -56, 26), (10, -60, 30), (50, -40, 26), (66, 0, 24), (-70, 10, 22),
+                  (40, 50, 22), (-20, 60, 20)])
+    return [(np.clip(blur(smoke, 4) * 1.6, 0, 1), SMOKE, 0.75, 0)] + log_layers(0, 0)
+
+
+def v_log_swap():
+    ghost = mask_of(poly(shifted(SHIP, 58, 70, 0.6, -0.5)))
+    streaks = mask_of(lambda c: [line(c, 58 - 70 * k, 70 - 62 * k + o, 30 - 70 * k, 40 - 62 * k + o, 1.6)
+                                 for k, o in [(0.2, 0), (0.5, 10), (0.8, -8)]])
+    smoke = puff([(-40, -40, 18), (-10, -52, 16), (24, -44, 16)])
+    return log_layers(-14, -20, 140, 32, 0.45) + [(np.clip(blur(smoke, 3) * 1.4, 0, 1), SMOKE, 0.6, 0),
+                                                 (streaks, (255, 240, 220), 0.6, 0), (ghost, (255, 248, 235), 0.9, 6)]
+
+
+def v_log_shots():
+    spikes = [(-40, 22, 1.9), (-6, -26, 1.2), (24, 18, 2.4), (52, -10, 0.6), (-22, -4, 2.9)]
+    darts = mask_of(lambda c: [c.fill(shifted([(0, -4), (34, 0), (0, 4)], x, y, 1.0, a), 1.0) for x, y, a in spikes])
+    tips = mask_of(lambda c: [c.fill(circle(x, y, 4), 1.0) for x, y, a in spikes])
+    return log_layers(0, 0) + [(darts, (255, 170, 140), 1.0, 4), (tips, (255, 230, 200), 1.0, 0)]
+
+
+def v_log_rings():
+    face = mask_of(lambda c: c.fill(ellipse(0, 0, 80, 80), 1.0))
+    bark_ring = np.clip(face - mask_of(lambda c: c.fill(ellipse(0, 0, 68, 68), 1.0)), 0, 1)
+    rings = mask_of(lambda c: [[line(c, *a, *b, 1.6) for a, b in zip(pts, pts[1:] + pts[:1])]
+                               for pts in [ellipse(3, -2, r, r * 0.96) for r in (54, 40, 27, 14)]])
+    crack = mask_of(lambda c: [line(c, *a, *b, 2.6) for a, b in [((0, 0), (22, 30)), ((22, 30), (16, 52)), ((16, 52), (34, 70))]])
+    smoke = puff([(-80, 60, 18), (82, -50, 16), (70, 70, 14)])
+    return [(np.clip(blur(smoke, 3) * 1.4, 0, 1), SMOKE, 0.6, 0), (face, WOOD, 1.0, 6), (bark_ring, BARK, 1.0, 0),
+            (rings * face, RING, 0.9, 0), (crack, BARK_DARK, 0.9, 0)]
+
+
+def v_log_leaves():
+    leaf = [(0, -6), (10, -3), (14, 0), (10, 3), (0, 6), (-10, 0)]
+    leaves = mask_of(lambda c: [c.fill(shifted(leaf, math.cos(a) * r, math.sin(a) * r, 1.3, a + 1.6), 1.0)
+                                for a, r in [(0.2, 90), (1.0, 80), (1.9, 94), (2.7, 84), (3.6, 92), (4.5, 86), (5.4, 96)]])
+    swirl = mask_of(lambda c: [line(c, math.cos(t) * (70 + t * 4), math.sin(t) * (70 + t * 4),
+                                    math.cos(t + 0.2) * (70 + (t + 0.2) * 4), math.sin(t + 0.2) * (70 + (t + 0.2) * 4), 1.4)
+                               for t in np.arange(0, 5.6, 0.2)])
+    return [(swirl, SMOKE, 0.5, 0), (leaves, (150, 220, 120), 1.0, 3)] + log_layers(0, 0, 130, 30, -0.6)
+
+
 VARIANTS = {"husk": v_husk, "egg": v_egg, "skin": v_skin, "absorb": v_absorb, "flake": v_flake,
+            "log_puff": v_log_puff, "log_swap": v_log_swap, "log_shots": v_log_shots, "log_rings": v_log_rings,
+            "log_leaves": v_log_leaves,
             "shell_molt": v_shell_molt, "shell_crack": v_shell_crack, "shell_plates": v_shell_plates,
             "shell_absorb": v_shell_absorb, "shell_split": v_shell_split}
 
