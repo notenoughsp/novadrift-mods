@@ -77,16 +77,40 @@ static int in_range(Range r, const void *p) { return (uint8_t *)p >= r.start && 
 
 static uint8_t *rel32_target(uint8_t *p) { return p + 4 + *(int32_t *)p; }
 
-// Finds "gml_Script_xyz" via the YYC function table {name, func, ...}.
-static uint8_t *find_gml_function(const char *name) {
-    size_t len = strlen(name) + 1;
-    for (uint8_t *p = g_rdata.start; p + len <= g_rdata.end; p++) {
-        if (*p != (uint8_t)name[0] || memcmp(p, name, len)) continue;
-        if (p > g_rdata.start && p[-1] != 0) continue;
-        for (uint8_t **q = (uint8_t **)g_data.start; (uint8_t *)(q + 2) <= g_data.end; q++)
-            if (q[0] == p && in_range(g_text, q[1])) return q[1];
+// YYC function table {name, func, ...}: collected once, sorted by name
+typedef struct { const char *name; uint8_t *func; size_t order; } FuncEntry;
+static FuncEntry *g_funcs;
+static size_t g_func_count;
+
+static int func_cmp(const void *a, const void *b) {
+    const FuncEntry *x = a, *y = b;
+    int c = strcmp(x->name, y->name);
+    return c ? c : (x->order > y->order) - (x->order < y->order);  // first entry wins
+}
+
+static void build_func_table(void) {
+    size_t cap = 1 << 14;
+    g_funcs = malloc(cap * sizeof *g_funcs);
+    for (uint8_t **q = (uint8_t **)g_data.start; (uint8_t *)(q + 2) <= g_data.end; q++) {
+        if (!in_range(g_rdata, q[0]) || q[0] + 4 > g_rdata.end || memcmp(q[0], "gml_", 4) ||
+            !in_range(g_text, q[1]))
+            continue;
+        if (g_func_count == cap) g_funcs = realloc(g_funcs, (cap *= 2) * sizeof *g_funcs);
+        g_funcs[g_func_count] = (FuncEntry){ (const char *)q[0], q[1], g_func_count };
+        g_func_count++;
     }
-    return NULL;
+    qsort(g_funcs, g_func_count, sizeof *g_funcs, func_cmp);
+}
+
+// Finds "gml_Script_xyz" / "gml_Object_..." by name
+static uint8_t *find_gml_function(const char *name) {
+    size_t lo = 0, hi = g_func_count;
+    while (lo < hi) {  // lower bound, so duplicates resolve to the first table entry
+        size_t mid = (lo + hi) / 2;
+        if (strcmp(g_funcs[mid].name, name) < 0) lo = mid + 1;
+        else hi = mid;
+    }
+    return lo < g_func_count && !strcmp(g_funcs[lo].name, name) ? g_funcs[lo].func : NULL;
 }
 
 static uint8_t *find_pattern(uint8_t *from, size_t len, const char *pat, const char *mask) {
@@ -130,19 +154,33 @@ static void build_var_table(void) {
 
 // Builtin functions (ds_list_add, sprite_add, ...) live in the same table but start
 // at 0 instead of -1. At runtime the entry holds the function index.
-static int builtin_id(const char *name) {
+static int32_t *builtin_slot(const char *name) {
     for (uint8_t *p = g_data.start; p + 16 <= g_data.end; p += 8) {
         const char *s = *(const char **)p;
-        if (in_range(g_rdata, s) && !strcmp(s, name)) return *(int32_t *)(p + 8);
+        if (in_range(g_rdata, s) && !strcmp(s, name)) return (int32_t *)(p + 8);
     }
-    return -1;
+    return NULL;
+}
+
+// The slot address is fixed; the runtime writes the real ID into it later
+static int32_t *var_slot(const char *name) {
+    VarEntry key = { name, NULL };
+    VarEntry *e = bsearch(&key, g_vars, g_var_count, sizeof *g_vars, var_cmp);
+    return e ? e->id : NULL;
 }
 
 static int var_id(const char *name) {
-    VarEntry key = { name, NULL };
-    VarEntry *e = bsearch(&key, g_vars, g_var_count, sizeof *g_vars, var_cmp);
-    return e ? *e->id : -1;
+    int32_t *s = var_slot(name);
+    return s ? *s : -1;
 }
+
+// Variable / builtin ID with the lookup cached per call site (name must be a literal)
+#define CACHED_SLOT(find, name) ({ \
+    static int32_t *slot_; static int tried_; \
+    if (!tried_) tried_ = 1, slot_ = find(name); \
+    slot_ ? *slot_ : -1; })
+#define VAR(name) CACHED_SLOT(var_slot, name)
+#define BI(name) CACHED_SLOT(builtin_slot, name)
 
 // GameMaker runtime RValue
 typedef struct { union { double real; int32_t i32; int64_t i64; void *ptr; }; uint32_t flags, kind; } RValue;
@@ -174,8 +212,13 @@ static void rv_set(RValue *rv, double v) {
     else g_set_real(rv, v);
 }
 
-static RValue *global_ref(const char *name) {
-    int id = var_id(name);
+static double get_var(void *self, int id) {
+    double v = -1;
+    if (id >= 0) rv_get(g_get_ref(self, id), &v);
+    return v;
+}
+
+static RValue *global_ref(int id) {
     void *g = g_global_ptr ? *g_global_ptr : NULL;
     if (id < 0 || !g) return NULL;
     VtGetRefFn fn = (*(VtGetRefFn **)g)[1];
@@ -236,7 +279,7 @@ static const char *table_name(const char **names, int count, int idx) {
 
 // ---------------------------------------------------------------- INI ------
 
-typedef struct { char section[32]; char name[64]; double value; } Override;
+typedef struct { char section[32]; char name[64]; double value; int32_t *slot; } Override;
 static Override *g_ovr;
 static size_t g_ovr_count, g_ovr_cap;
 static int g_dump, g_modded, g_block_always = 1;
@@ -330,10 +373,15 @@ static int parse_ini(const wchar_t *path, int allow_profile) {
         snprintf(o->section, sizeof o->section, "%s", section);
         snprintf(o->name, sizeof o->name, "%s", key);
         o->value = v;
+        o->slot = var_slot(key);
     }
     fclose(f);
     return 1;
 }
+
+// Caches the [newbody]/[newweapon] values (newgear.inc, whip.inc)
+static void newgear_config(void);
+static void whip_config(void);
 
 static void load_ini(void) {
     wchar_t path[MAX_PATH];
@@ -341,15 +389,17 @@ static void load_ini(void) {
     g_ovr_count = 0;
     g_dump = 0;
     g_block_always = 1;
-    if (!parse_ini(path, 1)) { logf_("No novadrift_mods.ini found"); return; }
-    logf_("novadrift_mods.ini loaded: %zu entries", g_ovr_count);
+    if (parse_ini(path, 1)) logf_("novadrift_mods.ini loaded: %zu entries", g_ovr_count);
+    else logf_("No novadrift_mods.ini found");
+    newgear_config();
+    whip_config();
 }
 
 static void apply_section(void *self, const char *section, int verbose) {
     for (size_t i = 0; i < g_ovr_count; i++) {
         Override *o = &g_ovr[i];
         if (_stricmp(o->section, section)) continue;
-        int id = var_id(o->name);
+        int id = o->slot ? *o->slot : -1;
         if (id < 0) {
             if (verbose) logf_("  [%s] %s: unknown variable", section, o->name);
             continue;
@@ -372,17 +422,10 @@ static void apply_gear(void *self, const char *prefix, int idx, const char *name
     apply_section(self, sec, verbose);
 }
 
-static double self_var(void *self, const char *name) {
-    int id = var_id(name);
-    double v = -1;
-    if (id >= 0) rv_get(g_get_ref(self, id), &v);
-    return v;
-}
-
 // Always blocked when values are modded, otherwise per block_leaderboards (default: on)
 static int block_leaderboards(void) {
     if (!g_modded && !g_block_always) return 0;
-    RValue *rv = global_ref("enableLeaderboards");
+    RValue *rv = global_ref(VAR("enableLeaderboards"));
     if (!rv) return 0;
     g_set_real(rv, 0.0);
     return 1;
@@ -482,9 +525,9 @@ static void *hk_assign_base_stats(void *self, void *other, void *ret, int argc, 
     gear_pre_assign(self);
     void *r = o_assign_base_stats(self, other, ret, argc, argv);
     static int last_body = -2, last_weapon = -2, last_shield = -2;
-    int body = (int)self_var(self, "bodyType");
-    int weapon = (int)self_var(self, "weaponType");
-    int shield = (int)self_var(self, "shieldType");
+    int body = (int)get_var(self, VAR("bodyType"));
+    int weapon = (int)get_var(self, VAR("weaponType"));
+    int shield = (int)get_var(self, VAR("shieldType"));
     const char *body_name = table_name(BODY_NAMES, sizeof BODY_NAMES / sizeof *BODY_NAMES, body);
     const char *shield_name = table_name(SHIELD_NAMES, sizeof SHIELD_NAMES / sizeof *SHIELD_NAMES, shield);
     const char *weapon_name = object_name(weapon);
@@ -498,7 +541,7 @@ static void *hk_assign_base_stats(void *self, void *other, void *ret, int argc, 
               weapon_name, weapon, shield_name, shield);
         if (g_dump)
             for (size_t i = 0; i < sizeof DUMP_VARS / sizeof *DUMP_VARS; i++)
-                logf_("  dump %s = %g", DUMP_VARS[i], self_var(self, DUMP_VARS[i]));
+                logf_("  dump %s = %g", DUMP_VARS[i], get_var(self, var_id(DUMP_VARS[i])));
     }
     // New gear (custom body/weapon) instead of the regular sections
     if (!newgear_post_assign(self, 0, verbose)) apply_gear(self, "body", body, body_name, verbose);
@@ -527,7 +570,8 @@ static void *hk_end_score(void *self, void *other, void *ret, int argc, void **a
 static void install(void) {
     find_sections();
     build_var_table();
-    logf_("Found %zu GML variables", g_var_count);
+    build_func_table();
+    logf_("Found %zu GML variables, %zu functions", g_var_count, g_func_count);
 
     uint8_t *init_vars = find_gml_function("gml_Script_initializeVariables");
     uint8_t *assign = find_gml_function("gml_Script_assignBaseStats");

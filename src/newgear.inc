@@ -9,10 +9,15 @@ typedef void (*AssignFn)(RValue *dst, const RValue *src);
 typedef void (*MakeStringFn)(RValue *out, const char *utf8);
 typedef void *(*CallBuiltinFn)(void *self, void *other, RValue *ret, int argc, int64_t fn, RValue **argv);
 typedef void (*GmlEventFn)(void *self, void *other);
+// Sets built-in instance variables (sprite_index, image_blend, ...)
+typedef void (*SetBuiltinVarFn)(void *inst, int id, int array_index, RValue *value);
 
 static AssignFn g_assign;
 static MakeStringFn g_make_string;
 static CallBuiltinFn g_call_builtin;
+static SetBuiltinVarFn g_set_builtin_var;
+static void *g_powers;  // oPowers instance of the current run (build and stats)
+static int g_obj_player = -1;
 
 typedef struct { const char *name; uint32_t rva; const char *bytes; } Helper;
 static const Helper HELPERS[] = {
@@ -21,11 +26,6 @@ static const Helper HELPERS[] = {
     { "callBuiltin", 0xf2d190, "\x40\x55\x41\x54\x41\x55\x41\x56\x41\x57" },
     { "setBuiltinVar", 0xf17460, "\x48\x89\x5c\x24\x08\x48\x89\x6c\x24\x10\x48\x89\x74\x24\x18" },
 };
-
-// Sets built-in instance variables (sprite_index, image_blend, ...)
-typedef void (*SetBuiltinVarFn)(void *inst, int id, int array_index, RValue *value);
-static SetBuiltinVarFn g_set_builtin_var;
-static void *g_powers;  // oPowers instance of the current run (build and stats)
 
 static void *resolve_helper(const Helper *h) {
     uint8_t *p = (uint8_t *)GetModuleHandleW(NULL) + h->rva;
@@ -36,6 +36,10 @@ static void *resolve_helper(const Helper *h) {
     return p;
 }
 
+// ---------------------------------------------------------- GML helpers ----
+
+#define NO_INDEX ((int)0x80000000)  // array index for non-array builtin variables
+
 static RValue obj_ref(int idx) {
     RValue r = { .i64 = 0x0100000000000000ll | (uint32_t)idx, .flags = 0, .kind = KIND_REF };
     return r;
@@ -43,6 +47,12 @@ static RValue obj_ref(int idx) {
 
 static int is_obj_ref(const RValue *rv, int idx) {
     return idx >= 0 && rv && (rv->kind & 0xffffff) == KIND_REF && (int32_t)rv->i64 == idx;
+}
+
+static int is_instance(const RValue *rv) {
+    double v = -4;
+    if ((rv->kind & 0xffffff) == KIND_REF) return 1;
+    return rv_get(rv, &v) && v >= 0;
 }
 
 static int find_object(const char *name) {
@@ -58,6 +68,81 @@ static RValue *make_real(RValue *rv, double v) {
     return rv;
 }
 
+// Constant GML string, created once per call site (s must be a literal)
+#define GSTR(s) ({ static RValue rv_; static int made_; if (!made_) made_ = 1, g_make_string(&rv_, s); rv_; })
+
+// Calls a builtin by index (see BI)
+static RValue call_bi(void *self, void *other, int id, int argc, RValue *args) {
+    RValue res = { .kind = 5 };  // undefined
+    if (id < 0) return res;
+    RValue *ptrs[10];
+    for (int k = 0; k < argc && k < 10; k++) ptrs[k] = &args[k];
+    g_call_builtin(self, other, &res, argc, id, ptrs);
+    return res;
+}
+
+static double inst_get(void *self, void *other, RValue inst, RValue var) {
+    RValue a[2] = { inst, var };
+    RValue r = call_bi(self, other, BI("variable_instance_get"), 2, a);
+    double v = 0;
+    rv_get(&r, &v);
+    return v;
+}
+
+static void inst_set(void *self, void *other, RValue inst, RValue var, RValue value) {
+    RValue a[3] = { inst, var, value };
+    call_bi(self, other, BI("variable_instance_set"), 3, a);
+}
+
+static void set_builtin(void *inst, int id, int index, RValue *value) {
+    if (id >= 0 && g_set_builtin_var) g_set_builtin_var(inst, id, index, value);
+}
+
+static void set_builtin_real(void *inst, int id, int index, double value) {
+    RValue v;
+    set_builtin(inst, id, index, make_real(&v, value));
+}
+
+static void set_self_var(void *inst, int id, double value) {
+    if (id >= 0) rv_set(g_get_ref(inst, id), value);
+}
+
+// sprite_add(file, frames, 0, 1, xorig, yorig); returns 1 if loaded
+static int add_sprite(void *self, void *other, const char *file, double frames, double ox, double oy, RValue *out) {
+    RValue a[6];
+    g_make_string(&a[0], file);
+    make_real(&a[1], frames);
+    make_real(&a[2], 0);
+    make_real(&a[3], 1);
+    make_real(&a[4], ox);
+    make_real(&a[5], oy);
+    *out = call_bi(self, other, BI("sprite_add"), 6, a);
+    double idx = -1;
+    rv_get(out, &idx);
+    logf_("Sprite %s loaded -> sprite %g", file, idx);
+    return idx >= 0;
+}
+
+// The game tints the white ship with the player's image_blend (shield color);
+// "shield" gives the same color, anything else is RRGGBB
+static int resolve_color(void *self, void *other, const char *spec, double *blend) {
+    if (!spec) return 0;
+    if (!_strnicmp(spec, "shield", 6)) {
+        if (g_obj_player < 0) return 0;
+        RValue a[2] = { obj_ref(g_obj_player) };
+        make_real(&a[1], 0);
+        RValue player = call_bi(self, other, BI("instance_find"), 2, a);
+        if (!is_instance(&player)) return 0;
+        *blend = inst_get(self, other, player, GSTR("image_blend"));
+        return 1;
+    }
+    unsigned rgb = (unsigned)strtoul(spec, NULL, 16);
+    *blend = (double)(((rgb & 0xff) << 16) | (rgb & 0xff00) | ((rgb >> 16) & 0xff));  // BGR
+    return 1;
+}
+
+// ------------------------------------------------------------ Gear state ----
+
 typedef struct {
     const char *section;    // INI section with texts
     const char *kind;       // "body" / "weapon" (value section [kind.<name>])
@@ -70,8 +155,10 @@ typedef struct {
     GmlEventFn o_id_create, o_id_alarm, o_base_create, o_base_alarm;
     RValue icon;
     int icon_state;         // 0 = not loaded, 1 = loaded, -1 = failed
-    struct { char name[64]; double value; } saved[32];
+    struct { int32_t *slot; double value; } saved[32];
     int saved_count;
+    const char *name, *icon_file;  // cached INI texts (newgear_config)
+    char values[96];        // value section name
 } NewGear;
 
 static NewGear g_gear[2] = {
@@ -79,39 +166,46 @@ static NewGear g_gear[2] = {
     { "newweapon", "weapon", "mRanger", "gearWeapons", -1, -1, -1 },
 };
 
-static const char *gear_text(NewGear *g, const char *key) { return gear_text_get(g->section, key); }
-static int gear_enabled(NewGear *g) { return g->id >= 0 && g->base >= 0 && gear_text(g, "name"); }
+static const char *g_shot_file, *g_shot_color;
 
-static int gear_type_now(NewGear *g, void *self) {
-    return (int)self_var(self, g == &g_gear[0] ? "bodyType" : "weaponType");
+static const char *gear_text(NewGear *g, const char *key) { return gear_text_get(g->section, key); }
+static int gear_enabled(NewGear *g) { return g->id >= 0 && g->base >= 0 && g->name; }
+
+static void newgear_config(void) {
+    for (int i = 0; i < 2; i++) {
+        NewGear *g = &g_gear[i];
+        g->name = gear_text(g, "name");
+        g->icon_file = gear_text(g, "icon");
+        snprintf(g->values, sizeof g->values, "%s.%s", g->kind, g->name ? g->name : "");
+    }
+    g_shot_file = gear_text(&g_gear[1], "shot");
+    g_shot_color = gear_text(&g_gear[1], "shot_color");
 }
 
 static int gear_active(NewGear *g, void *self) {
-    return gear_enabled(g) && g->selected && gear_type_now(g, self) == g->base_type;
+    if (!gear_enabled(g) || !g->selected) return 0;
+    int type = g == &g_gear[0] ? VAR("bodyType") : VAR("weaponType");
+    return (int)get_var(self, type) == g->base_type;
 }
 
 // Apply the value section; original values are saved on first use
 static void gear_apply(NewGear *g, void *self, int verbose) {
-    char sec[96];
-    snprintf(sec, sizeof sec, "%s.%s", g->kind, gear_text(g, "name"));
     if (!g->applied) {
         g->saved_count = 0;
         for (size_t i = 0; i < g_ovr_count && g->saved_count < 32; i++) {
-            if (_stricmp(g_ovr[i].section, sec) || var_id(g_ovr[i].name) < 0) continue;
-            snprintf(g->saved[g->saved_count].name, 64, "%s", g_ovr[i].name);
-            g->saved[g->saved_count++].value = self_var(self, g_ovr[i].name);
+            Override *o = &g_ovr[i];
+            if (_stricmp(o->section, g->values) || !o->slot || *o->slot < 0) continue;
+            g->saved[g->saved_count].slot = o->slot;
+            g->saved[g->saved_count++].value = get_var(self, *o->slot);
         }
         g->applied = 1;
     }
-    apply_section(self, sec, verbose);
+    apply_section(self, g->values, verbose);
 }
 
 static void gear_restore(NewGear *g, void *self) {
     if (!g->applied) return;
-    for (int i = 0; i < g->saved_count; i++) {
-        int id = var_id(g->saved[i].name);
-        if (id >= 0) rv_set(g_get_ref(self, id), g->saved[i].value);
-    }
+    for (int i = 0; i < g->saved_count; i++) set_self_var(self, *g->saved[i].slot, g->saved[i].value);
     g->applied = 0;
 }
 
@@ -123,6 +217,7 @@ static void gear_pre_assign(void *self) {
     }
 }
 
+// ---------------------------------------------------------- Upgrade info ----
 // Upgrade info functions: answer for new gear like its base gear
 #define UPGRADE_HOOKS(X) \
     X(FullString) X(HexGroup) X(HexSlot) X(IsRecursive) X(IsSuper) X(IsTier1) X(ShortString) \
@@ -197,31 +292,13 @@ TEXT_HOOK(FullString, "full")
 PLAIN_HOOK(HexGroup) PLAIN_HOOK(HexSlot) PLAIN_HOOK(IsRecursive) PLAIN_HOOK(IsSuper) PLAIN_HOOK(IsTier1)
 PLAIN_HOOK(SuperModList) PLAIN_HOOK(SuperModSprites) PLAIN_HOOK(TagList) PLAIN_HOOK(UnlockString)
 
-// Custom hex icon: loaded once via sprite_add (origin top left like the originals)
+// Custom hex icon: loaded once (origin top left like the originals)
 static void *hk_up_Sprite(void *self, void *other, void *ret, int argc, void **argv) {
     void *r;
     NewGear *g = call_upgrade(o_up_Sprite, self, other, ret, argc, argv, &r);
-    const char *file = g ? gear_text(g, "icon") : NULL;
-    if (!file || g->icon_state < 0) return r;
-    if (!g->icon_state) {
-        int add_id = builtin_id("sprite_add");
-        if (add_id < 0) { g->icon_state = -1; logf_("New gear: sprite_add not found"); return r; }
-        RValue a[6];
-        g_make_string(&a[0], file);
-        make_real(&a[1], 1);
-        make_real(&a[2], 0);
-        make_real(&a[3], 1);
-        make_real(&a[4], 0);
-        make_real(&a[5], 0);
-        RValue *args[6] = { &a[0], &a[1], &a[2], &a[3], &a[4], &a[5] };
-        g_call_builtin(self, other, &g->icon, 6, add_id, args);
-        double idx = -1;
-        rv_get(&g->icon, &idx);
-        g->icon_state = idx >= 0 ? 1 : -1;
-        logf_("New gear: icon %s loaded -> sprite %g", file, idx);
-        if (g->icon_state < 0) return r;
-    }
-    g_assign(ret, &g->icon);
+    if (!g || !g->icon_file || g->icon_state < 0) return r;
+    if (!g->icon_state) g->icon_state = add_sprite(self, other, g->icon_file, 1, 0, 0, &g->icon) ? 1 : -1;
+    if (g->icon_state > 0) g_assign(ret, &g->icon);
     return r;
 }
 
@@ -244,7 +321,8 @@ static void *hk_weapon_to_upgrade(void *self, void *other, void *ret, int argc, 
     return r;
 }
 
-// Events: the selection ID runs the base behavior and flags the new gear;
+// ---------------------------------------------------------------- Events ----
+// The selection ID runs the base behavior and flags the new gear;
 // the real base gear clears the flag.
 #define GEAR_EVENTS(i) \
     static void hk_id_create_##i(void *self, void *other) { \
@@ -257,7 +335,7 @@ static void *hk_weapon_to_upgrade(void *self, void *other, void *ret, int argc, 
         NewGear *g = &g_gear[i]; \
         if (!gear_enabled(g)) { g->o_id_alarm(self, other); return; } \
         g->selected = 1; \
-        logf_("New gear picked: %s", gear_text(g, "name")); \
+        logf_("New gear picked: %s", g->name); \
         g->o_base_alarm(self, other); \
     } \
     static void hk_base_create_##i(void *self, void *other) { \
@@ -278,8 +356,7 @@ static void hk_powers_create(void *self, void *other) {
     for (int i = 0; i < 2; i++) g_gear[i].selected = 0, g_gear[i].applied = 0;
     o_powers_create(self, other);
     g_powers = self;
-    static int add_id = -2;
-    if (add_id == -2) add_id = builtin_id("ds_list_add");
+    int add_id = BI("ds_list_add");
     for (int i = 0; i < 2; i++) {
         NewGear *g = &g_gear[i];
         if (!gear_enabled(g)) continue;
@@ -288,14 +365,14 @@ static void hk_powers_create(void *self, void *other) {
             logf_("New gear: %s (%d) / ds_list_add (%d) not found", g->list_var, list_id, add_id);
             continue;
         }
-        RValue item = obj_ref(g->id), res = { 0 };
-        RValue *args[2] = { g_get_ref(self, list_id), &item };
-        g_call_builtin(self, other, &res, 2, add_id, args);
-        logf_("New gear '%s' added to selection (%s)", gear_text(g, "name"), g->list_var);
+        RValue a[2] = { *g_get_ref(self, list_id), obj_ref(g->id) };
+        call_bi(self, other, add_id, 2, a);
+        logf_("New gear '%s' added to selection (%s)", g->name, g->list_var);
     }
 }
 
-// Looks: enable the new body's skin while it is picked
+// ------------------------------------------------------------------ Skin ----
+// Enable the new body's skin while it is picked
 static GmlFn g_set_skin_data, o_save_settings;
 static int g_skin_active, g_skin_index = -1;
 static double g_user_skin;
@@ -303,16 +380,13 @@ static double g_user_skin;
 static int skin_row(const char *name) {
     wchar_t path[MAX_PATH];
     swprintf(path, MAX_PATH, L"%ls\\custom_skins\\custom_skins.csv", g_dir);
-    FILE *f = _wfopen(path, L"r");
-    if (!f || !name) { if (f) fclose(f); return -1; }
+    FILE *f = name ? _wfopen(path, L"r") : NULL;
+    if (!f) return -1;
     char line[512];
+    size_t len = strlen(name);
     int row = -1, found = -1;  // header = -1, first skin row = 0
     while (fgets(line, sizeof line, f)) {
-        char *comma = strchr(line, ',');
-        if (comma && row >= 0 && (size_t)(comma - line) == strlen(name) && !strncmp(line, name, comma - line)) {
-            found = row;
-            break;
-        }
+        if (row >= 0 && !strncmp(line, name, len) && line[len] == ',') { found = row; break; }
         row++;
     }
     fclose(f);
@@ -320,7 +394,7 @@ static int skin_row(const char *name) {
 }
 
 static void set_skin(void *self, void *other, int active) {
-    RValue *rv = global_ref("customSkin");
+    RValue *rv = global_ref(VAR("customSkin"));
     if (!rv || !g_set_skin_data) return;
     if (active) {
         if (g_skin_index < 0) g_skin_index = skin_row(gear_text(&g_gear[0], "skin"));
@@ -336,19 +410,37 @@ static void set_skin(void *self, void *other, int active) {
           active ? (double)g_skin_index : g_user_skin);
 }
 
-static void update_skin(void *self, void *other, int want) {
-    if (want != g_skin_active) set_skin(self, other, want);
-}
-
 // Saving settings: store the player's own skin choice, not the new body's skin
 static void *hk_save_settings(void *self, void *other, void *ret, int argc, void **argv) {
-    RValue *rv = g_skin_active ? global_ref("customSkin") : NULL;
+    RValue *rv = g_skin_active ? global_ref(VAR("customSkin")) : NULL;
     double cur = 0;
     if (rv) { rv_get(rv, &cur); g_set_real(rv, g_user_skin); }
     void *r = o_save_settings(self, other, ret, argc, argv);
     if (rv) g_set_real(rv, cur);
     return r;
 }
+
+// ------------------------------------------------------------------ Shot ----
+// Custom shot look: [newweapon] shot=<png>, shot_origin_x/y, shot_color
+static GmlEventFn o_shot_create;
+static RValue g_shot_sprite;
+static int g_shot_state;  // 0 = not loaded, 1 = loaded, -1 = failed
+
+static void hk_shot_create(void *self, void *other) {
+    o_shot_create(self, other);
+    if (!g_shot_file || g_shot_state < 0 || !g_powers || !gear_active(&g_gear[1], g_powers)) return;
+    if (!g_shot_state) {
+        const char *ox = gear_text(&g_gear[1], "shot_origin_x"), *oy = gear_text(&g_gear[1], "shot_origin_y");
+        g_shot_state = add_sprite(self, other, g_shot_file, 1, ox ? atof(ox) : 0, oy ? atof(oy) : 0,
+                                  &g_shot_sprite) ? 1 : -1;
+        if (g_shot_state < 0) return;
+    }
+    set_builtin(self, VAR("sprite_index"), NO_INDEX, &g_shot_sprite);
+    double blend;
+    if (resolve_color(self, other, g_shot_color, &blend)) set_builtin_real(self, VAR("image_blend"), NO_INDEX, blend);
+}
+
+// --------------------------------------------------------------- Install ----
 
 static GmlEventFn hook_event(const char *object, const char *event, void *detour) {
     char fn[96], label[64];
@@ -357,51 +449,8 @@ static GmlEventFn hook_event(const char *object, const char *event, void *detour
     return (GmlEventFn)hook(find_gml_function(fn), detour, label);
 }
 
-// Custom shot look: [newweapon] shot=<png>, shot_origin_x/y, shot_color
-static GmlEventFn o_shot_create;
-static RValue g_shot_sprite;
-static int g_shot_state;  // 0 = not loaded, 1 = loaded, -1 = failed
-
-// image_blend value: "shield" = player's shield color, else RRGGBB (see whip.inc)
-static int resolve_color(void *self, void *other, const char *spec, double *blend);
-
-static void set_builtin(void *inst, const char *name, RValue *value) {
-    int id = var_id(name);
-    if (id >= 0 && g_set_builtin_var) g_set_builtin_var(inst, id, (int)0x80000000, value);
-}
-
-static void hk_shot_create(void *self, void *other) {
-    o_shot_create(self, other);
-    NewGear *g = &g_gear[1];
-    const char *file = gear_text(g, "shot");
-    if (!file || !g_powers || !gear_active(g, g_powers) || g_shot_state < 0) return;
-    if (!g_shot_state) {
-        int add_id = builtin_id("sprite_add");
-        const char *ox = gear_text(g, "shot_origin_x"), *oy = gear_text(g, "shot_origin_y");
-        RValue a[6];
-        g_make_string(&a[0], file);
-        make_real(&a[1], 1);
-        make_real(&a[2], 0);
-        make_real(&a[3], 1);
-        make_real(&a[4], ox ? atof(ox) : 0);
-        make_real(&a[5], oy ? atof(oy) : 0);
-        RValue *args[6] = { &a[0], &a[1], &a[2], &a[3], &a[4], &a[5] };
-        if (add_id >= 0) g_call_builtin(self, other, &g_shot_sprite, 6, add_id, args);
-        double idx = -1;
-        rv_get(&g_shot_sprite, &idx);
-        g_shot_state = idx >= 0 ? 1 : -1;
-        logf_("New gear: shot sprite %s loaded -> sprite %g", file, idx);
-        if (g_shot_state < 0) return;
-    }
-    set_builtin(self, "sprite_index", &g_shot_sprite);
-    double blend;
-    if (resolve_color(self, other, gear_text(g, "shot_color"), &blend)) {
-        RValue c;
-        set_builtin(self, "image_blend", make_real(&c, blend));
-    }
-}
-
 static void install_newgear(void) {
+    g_obj_player = find_object("oPlayer");
     g_assign = (AssignFn)resolve_helper(&HELPERS[0]);
     g_make_string = (MakeStringFn)resolve_helper(&HELPERS[1]);
     g_call_builtin = (CallBuiltinFn)resolve_helper(&HELPERS[2]);
@@ -409,26 +458,21 @@ static void install_newgear(void) {
     if (!g_assign || !g_make_string || !g_call_builtin) { logf_("New gear: disabled"); return; }
 
     // Base: body is always the standard form, weapon comes from [newweapon] base=<name>
-    static char weapon_base[64];
     const char *wb = gear_text(&g_gear[1], "base");
-    snprintf(weapon_base, sizeof weapon_base, "%s", wb ? wb : "");
-    const char *bases[2] = { "BodyDefault", weapon_base };
+    const char *bases[2] = { "BodyDefault", wb ? wb : "" };
     void *id_create[2] = { hk_id_create_0, hk_id_create_1 }, *id_alarm[2] = { hk_id_alarm_0, hk_id_alarm_1 };
     void *base_create[2] = { hk_base_create_0, hk_base_create_1 }, *base_alarm[2] = { hk_base_alarm_0, hk_base_alarm_1 };
     for (int i = 0; i < 2; i++) {
         NewGear *g = &g_gear[i];
-        if (!gear_text(g, "name") || !*bases[i]) continue;
-        char base_obj[80];
+        if (!g->name || !*bases[i]) continue;
+        char base_obj[80], type_obj[80];
         snprintf(base_obj, sizeof base_obj, "g%s", bases[i]);
+        snprintf(type_obj, sizeof type_obj, "o%s", bases[i]);  // weapon projectile object
         g->id = find_object(g->id_object);
         g->base = find_object(base_obj);
-        if (i == 1) {
-            char weapon_obj[80];
-            snprintf(weapon_obj, sizeof weapon_obj, "o%s", bases[i]);
-            g->base_type = find_object(weapon_obj);
-        }
+        if (i == 1) g->base_type = find_object(type_obj);
         if (g->id < 0 || g->base < 0 || g->base_type < 0) {
-            logf_("New gear %s: objects not found (%s/%s)", gear_text(g, "name"), g->id_object, base_obj);
+            logf_("New gear %s: objects not found (%s/%s)", g->name, g->id_object, base_obj);
             g->id = -1;
             continue;
         }
@@ -437,12 +481,9 @@ static void install_newgear(void) {
         g->o_id_create = hook_event(g->id_object, "Create_0", id_create[i]);
         g->o_id_alarm = hook_event(g->id_object, "Alarm_0", id_alarm[i]);
         if (!g->o_base_create || !g->o_base_alarm || !g->o_id_create || !g->o_id_alarm) g->id = -1;
-        // Recolor/replace the base weapon's projectile (oX)
-        if (i == 1 && g->id >= 0 && gear_text(g, "shot") && g_set_builtin_var) {
-            char shot_obj[80];
-            snprintf(shot_obj, sizeof shot_obj, "o%s", bases[i]);
-            o_shot_create = hook_event(shot_obj, "Create_0", hk_shot_create);
-        }
+        // Recolor/replace the base weapon's projectile
+        if (i == 1 && g->id >= 0 && g_shot_file && g_set_builtin_var)
+            o_shot_create = hook_event(type_obj, "Create_0", hk_shot_create);
     }
 
     o_powers_create = (GmlEventFn)hook(find_gml_function("gml_Object_oPowers_Create_0"), hk_powers_create, "oPowers_Create_0");
@@ -459,11 +500,13 @@ static void install_newgear(void) {
 static int newgear_post_assign(void *self, int which, int verbose) {
     NewGear *g = &g_gear[which];
     if (!gear_active(g, self)) return 0;
-    if (verbose) logf_("  New gear active: %s", gear_text(g, "name"));
+    if (verbose) logf_("  New gear active: %s", g->name);
     gear_apply(g, self, verbose);
     return 1;
 }
 
 static void newgear_update_skin(void *self, void *other) {
-    if (gear_enabled(&g_gear[0])) update_skin(self, other, gear_active(&g_gear[0], self));
+    if (!gear_enabled(&g_gear[0])) return;
+    int want = gear_active(&g_gear[0], self);
+    if (want != g_skin_active) set_skin(self, other, want);
 }
