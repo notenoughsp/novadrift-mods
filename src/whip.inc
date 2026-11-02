@@ -4,14 +4,14 @@
 // flames, trail and movement disabled. Values: whip_* in [newweapon].
 
 static GmlEventFn o_player_step, o_venom_create;
-static int g_obj_solid = -1, g_obj_venom = -1;
+static int g_obj_solid = -1, g_obj_venom = -1, g_obj_enemy_shot = -1;
 static int g_whip_cooldown;
 
 // whip_* values, read after each INI load
 static struct {
     const char *sprite, *color;
     double damage, range, angle, swing, scale, origin_x, origin_y, tolerance;
-    int on, frames, anim, cooldown;
+    int on, frames, anim, cooldown, block;
 } g_wc;
 
 static double whip_param(const char *key, double def) {
@@ -34,6 +34,7 @@ static void whip_config(void) {
     g_wc.frames = (int)whip_param("whip_frames", 12);
     g_wc.anim = (int)whip_param("whip_anim_frames", 1);
     g_wc.cooldown = (int)whip_param("whip_cooldown", 45);
+    g_wc.block = (int)whip_param("whip_block", 1);
     if (g_wc.frames < 1) g_wc.frames = 1;
     if (g_wc.anim < 1) g_wc.anim = 1;
 }
@@ -121,6 +122,19 @@ static void whip_strike(void *self, void *other, RValue player, double px, doubl
     g_whip_cooldown = g_wc.cooldown;
 }
 
+// Destroys enemy projectiles touching the tail (its precise mask, current frame)
+static void whip_block(void *w, double x, double y) {
+    RValue a[3];
+    make_real(&a[0], x);
+    make_real(&a[1], y);
+    a[2] = obj_ref(g_obj_enemy_shot);
+    for (int n = 0; n < 16; n++) {  // destroyed instances are skipped by the next check
+        RValue shot = call_bi(w, w, BI("instance_place"), 3, a);
+        if (!is_instance(&shot)) break;
+        call_bi(w, w, BI("instance_destroy"), 1, &shot);
+    }
+}
+
 // Keep active lashes at the stern and swing them through the arc
 static void whip_update(void *self, void *other, double px, double py, double face) {
     if (!g_whip_count) return;
@@ -147,6 +161,7 @@ static void whip_update(void *self, void *other, double px, double py, double fa
         double frame = floor(t * g_wc.anim);
         set_builtin_real(w, vindex, NO_INDEX, frame >= g_wc.anim ? g_wc.anim - 1 : frame);
         set_builtin_real(w, vyscale, NO_INDEX, -g_whips[i].side * g_wc.scale);
+        if (g_wc.block && g_obj_enemy_shot >= 0) whip_block(w, tx, ty);
         if (++g_whips[i].frame > g_wc.frames) {
             // Fade out: the instance destroys itself next step
             set_self_var(w, VAR("fade"), 1);
@@ -178,6 +193,7 @@ static void install_whip(void) {
     if (!g_wc.on || g_gear[1].id < 0) return;
     g_obj_solid = find_object("oSolid");
     g_obj_venom = find_object("oVenomStrike");
+    g_obj_enemy_shot = find_object("oEnemyProjectile");  // parent of all enemy shots
     if (g_obj_player < 0 || g_obj_solid < 0 || g_obj_venom < 0) { logf_("Whip: objects missing"); return; }
     o_venom_create = hook_event("oVenomStrike", "Create_0", hk_venom_create);
     if (!o_venom_create) return;
